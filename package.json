@@ -1,0 +1,7 @@
+{
+  "name": "beatport-local-downloader-userscript",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

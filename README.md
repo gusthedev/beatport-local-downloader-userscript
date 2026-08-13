@@ -1,13 +1,28 @@
 # Beatport Local Download Userscript
 
-This repository contains Gustavo's Beatport-to-BeatportDL userscript.
+This repository contains Gustavo's public Beatport-to-BeatportDL userscript. It creates a small local `.txt` job that Hazel passes to the locally installed BeatportDL application.
+
+## Features
+
+- Adds local-download actions beside eligible track, release, playlist, chart, label, and artist links.
+- Adds one page-title action for each supported Beatport media page, including library playlists.
+- Reconciles controls during Beatport single-page navigation without repeatedly rescanning the entire document.
+- Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
 
 ## Installation
 
-Install `beatport-local-loader.user.js` in Tampermonkey once. The loader retrieves the latest `beatport-local-hazel.user.js` from this repository whenever a Beatport page loads, so future changes do not require manually replacing the script in every browser.
+Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once.
+
+On first use, the loader downloads and validates the shared core. After that it starts the cached last-known-good core immediately at `document-start`, checks GitHub at most hourly using conditional requests, and keeps working from cache if GitHub is unavailable. A newer core takes effect on the next Beatport page load. Tampermonkey menu commands can check for a core update or show cache and rollback status.
+
+The loader itself has separate Tampermonkey update metadata pointing to the loader file, so later loader-mechanism changes can update without replacing it with the core.
 
 Disable or remove older copies of **Beatport Local FLAC Download (Hazel)** after enabling the loader to avoid running two copies at once.
 
 ## Privacy
 
 The repository contains no Beatport username, password, tokens, or BeatportDL configuration. Credentials and download processing remain local to the Mac.
+
+## Development checks
+
+Run `npm test` with Node.js. The dependency-free tests cover accepted and rejected Beatport URLs, canonicalization, mutation batching, single-page navigation, singleton initialization, Hazel job format, duplicate prevention, and temporary URL cleanup.
