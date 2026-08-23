@@ -236,6 +236,24 @@ test('local-only mode changes only the routing marker in the job filename', () =
     assert.equal(downloads[0].download.startsWith('beatportdl-localonly-track-654-'), true);
 });
 
+test('stale buttons are replaced so an older click handler cannot keep control', () => {
+    const { hooks } = createContext({ localOnly: true });
+    let removed = false;
+    const staleIcon = {
+        classList: classList(),
+        dataset: { tmBeatportCoreVersion: '1.7.0' },
+        parentElement: null,
+        remove() { removed = true; },
+    };
+    assert.equal(hooks.claimCurrentIcon(staleIcon), null);
+    assert.equal(removed, true);
+
+    const currentIcon = {
+        dataset: { tmBeatportCoreVersion: '1.8.1' },
+    };
+    assert.equal(hooks.claimCurrentIcon(currentIcon), currentIcon);
+});
+
 test('recognizes cross-realm anchor wrappers without instanceof checks', () => {
     const { hooks } = createContext();
     const anchor = {
