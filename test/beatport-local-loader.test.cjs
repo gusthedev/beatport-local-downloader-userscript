@@ -18,6 +18,7 @@ const STORAGE = {
     fallback: 'beatportLoader.sharedCore.fallbackSource.v1',
     etag: 'beatportLoader.sharedCore.etag.v1',
     lastAttempt: 'beatportLoader.sharedCore.lastAttempt.v1',
+    rejected: 'beatportLoader.sharedCore.rejectedSignature.v1',
 };
 
 function core(version, body = '') {
@@ -29,7 +30,8 @@ function core(version, body = '') {
 // ${'validated fixture '.repeat(70)}
 // ==/UserScript==
 globalThis.__beatportCoreRuns = [...(globalThis.__beatportCoreRuns || []), '${version}'];
-${body}`;
+${body}
+globalThis[Symbol.for('tm.beatportdl.local.instance')] = { version: '${version}' };`;
 }
 
 function runLoader({ storageValues = {}, response = null, requestFailure = '' } = {}) {
@@ -55,6 +57,7 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '' } 
         GM_setValue: (key, value) => storage.set(key, value),
         GM_deleteValue: (key) => storage.delete(key),
         GM_registerMenuCommand: (label, callback) => menus.set(label, callback),
+        GM_setClipboard() {},
         GM_xmlhttpRequest(request) {
             requests.push(request);
             if (requestFailure === 'network') request.onerror(new Error('offline'));
@@ -162,6 +165,7 @@ test('runtime failure restores and executes the rollback core', () => {
     assert.deepEqual(Array.from(harness.context.__beatportCoreRuns), ['1.6.0', '1.5.3']);
     assert.equal(harness.storage.get(STORAGE.source), fallback);
     assert.equal(harness.storage.has(STORAGE.fallback), false);
+    assert.equal(harness.storage.has(STORAGE.rejected), true);
 });
 
 test('loader update metadata points to the loader, never the shared core', () => {
@@ -169,4 +173,35 @@ test('loader update metadata points to the loader, never the shared core', () =>
     assert.match(metadata, /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/gusthedev\/beatport-local-downloader-userscript\/main\/beatport-local-loader\.user\.js/);
     assert.match(metadata, /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/gusthedev\/beatport-local-downloader-userscript\/main\/beatport-local-loader\.user\.js/);
     assert.doesNotMatch(metadata, /@(updateURL|downloadURL).*beatport-local-hazel\.user\.js/);
+});
+
+test('manual update bypasses local caches', () => {
+    const current = core('1.6.0');
+    const harness = runLoader({
+        storageValues: {
+            [STORAGE.source]: current,
+            [STORAGE.etag]: '"core-160"',
+            [STORAGE.lastAttempt]: Date.now(),
+        },
+    });
+    harness.menus.get('Check for shared-core updates now')();
+    const request = harness.requests.at(-1);
+    assert.match(request.url, /\?tm_refresh=\d+$/);
+    assert.equal(request.headers['Cache-Control'], 'no-cache');
+    request.onload({ status: 304, responseHeaders: '' });
+});
+
+test('non-initializing core is rejected instead of being marked active', () => {
+    const silent = core('1.7.0').replace(
+        "globalThis[Symbol.for('tm.beatportdl.local.instance')] = { version: '1.7.0' };",
+        ''
+    );
+    const harness = runLoader({
+        storageValues: {
+            [STORAGE.source]: silent,
+            [STORAGE.lastAttempt]: Date.now(),
+        },
+    });
+    assert.equal(harness.storage.has(STORAGE.source), false);
+    assert.equal(harness.context.__beatportCoreRuns[0], '1.7.0');
 });

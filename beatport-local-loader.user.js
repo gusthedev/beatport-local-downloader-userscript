@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.2.0
+// @version      1.3.0
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @downloadURL  https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
@@ -21,16 +22,23 @@
 (function () {
     'use strict';
 
+    const CONFIRM_LARGE_JOBS_KEY = 'beatportLoader.confirmLargeJobs.v1';
+    globalThis.BEATPORTDL_CONFIG = Object.freeze({
+        confirmLargeJobs: GM_getValue(CONFIRM_LARGE_JOBS_KEY, true) !== false,
+    });
+
     const SHARED_SCRIPT_URL = 'https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-hazel.user.js';
     const UPDATE_INTERVAL = 60 * 60 * 1000;
     const EMPTY_CACHE_RETRY_INTERVAL = 5 * 60 * 1000;
     const REQUEST_TIMEOUT = 15_000;
+    const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
     const STORAGE = Object.freeze({
         source: 'beatportLoader.sharedCore.source.v1',
         fallbackSource: 'beatportLoader.sharedCore.fallbackSource.v1',
         etag: 'beatportLoader.sharedCore.etag.v1',
         lastAttempt: 'beatportLoader.sharedCore.lastAttempt.v1',
         rejectedSignature: 'beatportLoader.sharedCore.rejectedSignature.v1',
+        confirmLargeJobs: CONFIRM_LARGE_JOBS_KEY,
     });
 
     let activeSource = '';
@@ -85,11 +93,14 @@
         return { primary, fallback: fallback === primary ? '' : fallback };
     }
 
-    function executeSharedCore(source, label) {
+    function executeSharedCore(source, label, { clearRejected = true } = {}) {
+        if (globalThis[INSTANCE_KEY]) return true;
         if (activeSource || !isValidSharedCore(source)) return false;
         try {
             eval(`${source}\n//# sourceURL=beatport-local-hazel.user.js`);
+            if (!globalThis[INSTANCE_KEY]) throw new Error('The shared core returned without initializing.');
             activeSource = source;
+            if (clearRejected) GM_deleteValue(STORAGE.rejectedSignature);
             return true;
         } catch (error) {
             GM_setValue(STORAGE.rejectedSignature, sourceSignature(source));
@@ -110,7 +121,7 @@
             GM_deleteValue(STORAGE.etag);
         }
 
-        if (fallback && executeSharedCore(fallback, 'fallback shared core')) {
+        if (fallback && executeSharedCore(fallback, 'fallback shared core', { clearRejected: false })) {
             GM_setValue(STORAGE.source, fallback);
             GM_deleteValue(STORAGE.fallbackSource);
             GM_deleteValue(STORAGE.etag);
@@ -158,6 +169,10 @@
         const previousSource = primary || fallback;
         const etag = primary ? GM_getValue(STORAGE.etag, '') : '';
         const headers = etag ? { 'If-None-Match': etag } : {};
+        if (manual) {
+            headers['Cache-Control'] = 'no-cache';
+            headers.Pragma = 'no-cache';
+        }
 
         function fail(message, error) {
             updateInFlight = false;
@@ -168,7 +183,7 @@
 
         GM_xmlhttpRequest({
             method: 'GET',
-            url: SHARED_SCRIPT_URL,
+            url: manual ? `${SHARED_SCRIPT_URL}?tm_refresh=${Date.now()}` : SHARED_SCRIPT_URL,
             headers,
             timeout: REQUEST_TIMEOUT,
             onload(response) {
@@ -239,9 +254,16 @@
             `Active: ${activeSource ? sharedCoreVersion(activeSource) : 'none'}`,
             `Cached: ${primary ? sharedCoreVersion(primary) : 'none'}`,
             `Rollback: ${fallback ? sharedCoreVersion(fallback) : 'none'}`,
+            `Confirm artist/label jobs: ${globalThis.BEATPORTDL_CONFIG.confirmLargeJobs ? 'yes' : 'no'}`,
             `Last update check: ${lastAttempt ? new Date(lastAttempt).toLocaleString() : 'never'}`,
         ];
         notify(details.join('\n'));
+    });
+
+    GM_registerMenuCommand('Toggle artist/label confirmation', () => {
+        const next = !globalThis.BEATPORTDL_CONFIG.confirmLargeJobs;
+        GM_setValue(STORAGE.confirmLargeJobs, next);
+        notify(`Artist/label confirmation is now ${next ? 'enabled' : 'disabled'}. Reload the page to apply it.`);
     });
 
     startCachedCore();

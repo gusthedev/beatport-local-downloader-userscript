@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.6.0
+// @version      1.7.0
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -15,6 +15,9 @@
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
+    const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
+        ? globalThis.BEATPORTDL_CONFIG
+        : {};
     const existingInstance = globalThis[INSTANCE_KEY];
 
     if (existingInstance) {
@@ -26,6 +29,7 @@
     const TITLE_ICON_CLASS = 'tm-beatportdl-page-title-icon';
     const TITLE_WRAP_CLASS = 'tm-beatportdl-page-title-wrap';
     const LABEL_PARENT_CLASS = 'tm-beatportdl-label-parent';
+    const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const JOB_DEBOUNCE_MS = 1500;
     const FEEDBACK_MS = 2500;
@@ -35,10 +39,12 @@
         activeHeading: null,
         activeTitleIcon: null,
         activeTitleParent: null,
+        confirmedLargeJobs: new Set(),
         feedbackTimers: new WeakMap(),
         objectUrlTimers: new Map(),
         recentJobs: new Map(),
         resizeObserver: null,
+        statusTimer: 0,
         started: false,
         testHooks: null,
         titlePositionFrame: 0,
@@ -53,6 +59,15 @@
 
     function mediaKey(media) {
         return media ? `${media.type}:${media.id}` : '';
+    }
+
+    function isElementNode(value) {
+        return Boolean(value) && value.nodeType === 1
+            && typeof value.querySelectorAll === 'function';
+    }
+
+    function isAnchorNode(value) {
+        return isElementNode(value) && String(value.tagName || '').toUpperCase() === 'A';
     }
 
     function getBeatportMediaUrl(value) {
@@ -91,19 +106,19 @@
     }
 
     function getEligibleMedia(link) {
-        if (!(link instanceof HTMLAnchorElement)) return null;
+        if (!isAnchorNode(link)) return null;
         if (!link.closest('main') && !link.closest('[class*="Player-style__"]')) return null;
         return getBeatportMediaUrl(link.getAttribute('href'));
     }
 
     function isOwnedNode(node) {
-        const element = node instanceof Element ? node : node?.parentElement;
+        const element = isElementNode(node) ? node : node?.parentElement;
         return Boolean(element?.matches?.(`[${OWNED_ATTRIBUTE}]`) || element?.closest?.(`[${OWNED_ATTRIBUTE}]`));
     }
 
     function elementsMatching(root, selector) {
         if (!root) return [];
-        const matches = root instanceof Element && root.matches(selector) ? [root] : [];
+        const matches = isElementNode(root) && root.matches(selector) ? [root] : [];
         if (root.querySelectorAll) matches.push(...root.querySelectorAll(selector));
         return matches;
     }
@@ -160,6 +175,59 @@
         icon.classList.toggle('tm-beatportdl-local-error', !success);
         const timer = window.setTimeout(() => clearFeedback(icon, true), FEEDBACK_MS);
         instance.feedbackTimers.set(icon, timer);
+    }
+
+    function showStatus(message, success = true) {
+        let status = document.getElementById?.(STATUS_ID);
+        if (!status) {
+            status = document.createElement('div');
+            status.id = STATUS_ID;
+            status.setAttribute(OWNED_ATTRIBUTE, 'status');
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            document.documentElement.appendChild(status);
+        }
+        if (instance.statusTimer) window.clearTimeout(instance.statusTimer);
+        status.classList.toggle('tm-beatportdl-status-error', !success);
+        status.textContent = message;
+        status.hidden = false;
+        instance.statusTimer = window.setTimeout(() => {
+            status.hidden = true;
+            instance.statusTimer = 0;
+        }, FEEDBACK_MS * 2);
+    }
+
+    function confirmLargeJob(media) {
+        if (!['artist', 'label'].includes(media?.type) || loaderConfig.confirmLargeJobs === false) return true;
+        const key = mediaKey(media);
+        if (instance.confirmedLargeJobs.has(key)) return true;
+        const accepted = typeof window.confirm !== 'function' || window.confirm(
+            `Queue this entire ${media.type} catalog? This can create a large BeatportDL job.`
+        );
+        if (accepted) instance.confirmedLargeJobs.add(key);
+        return accepted;
+    }
+
+    function copyMediaUrl(media, icon) {
+        if (!media?.url) return false;
+        try {
+            if (typeof GM_setClipboard === 'function') GM_setClipboard(media.url, 'text');
+            else if (navigator.clipboard?.writeText) navigator.clipboard.writeText(media.url);
+            else return false;
+            setFeedback(icon, true);
+            showStatus(`Copied ${media.type} URL`);
+            return true;
+        } catch {
+            setFeedback(icon, false);
+            showStatus('Could not copy the Beatport URL', false);
+            return false;
+        }
+    }
+
+    function handleMediaAction(event, media, icon) {
+        if (event?.shiftKey) return copyMediaUrl(media, icon);
+        if (!confirmLargeJob(media)) return false;
+        return createHazelJob(media, icon);
     }
 
     function updateLabelParent(parent) {
@@ -239,10 +307,12 @@
             download.click();
             scheduleObjectUrlCleanup(objectUrl);
             setFeedback(icon, true);
+            showStatus(`Queued ${job.filename}`);
             return true;
         } catch {
             if (objectUrl) revokeObjectUrl(objectUrl);
             setFeedback(icon, false);
+            showStatus('Could not create the Hazel job', false);
             return false;
         } finally {
             download?.remove();
@@ -259,8 +329,33 @@
         return icons;
     }
 
+    function semanticItem(link) {
+        return link.closest(
+            'tr, li, article, [role="row"], [data-testid*="track" i], '
+            + '[class*="TrackRow"], [class*="TableRow"], [class*="ListItem"]'
+        );
+    }
+
+    function preferredMediaLink(link, media) {
+        const item = semanticItem(link);
+        if (!item) return link;
+        const candidates = Array.from(item.querySelectorAll('a[href]')).filter((candidate) => {
+            const candidateMedia = getEligibleMedia(candidate);
+            return candidateMedia && mediaKey(candidateMedia) === mediaKey(media) && candidate.textContent.trim();
+        });
+        return candidates.reduce((best, candidate) => {
+            const score = (candidate.querySelector('img, picture') ? -1000 : 0)
+                + Math.min(candidate.textContent.trim().length, 80)
+                + (candidate.querySelector('h1, h2, h3, h4') ? 200 : 0);
+            const bestScore = (best.querySelector('img, picture') ? -1000 : 0)
+                + Math.min(best.textContent.trim().length, 80)
+                + (best.querySelector('h1, h2, h3, h4') ? 200 : 0);
+            return score > bestScore ? candidate : best;
+        }, link);
+    }
+
     function enhanceLink(link) {
-        if (!(link instanceof HTMLAnchorElement) || link.classList.contains(ICON_CLASS)) return;
+        if (!isAnchorNode(link) || link.classList.contains(ICON_CLASS)) return;
 
         const media = getEligibleMedia(link);
         const icons = adjacentLinkIcons(link);
@@ -268,7 +363,7 @@
         icons.forEach(removeIcon);
         const containsArtwork = Boolean(link.querySelector('img, picture'));
 
-        if (!media || !link.textContent.trim() || containsArtwork) {
+        if (!media || !link.textContent.trim() || containsArtwork || preferredMediaLink(link, media) !== link) {
             removeIcon(existingIcon);
             return;
         }
@@ -283,7 +378,7 @@
             icon.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                createHazelJob(icon._tmBeatportMedia, icon);
+                handleMediaAction(event, icon._tmBeatportMedia, icon);
             });
             link.insertAdjacentElement('afterend', icon);
         }
@@ -291,15 +386,15 @@
         icon.classList.toggle('tm-beatportdl-label-icon', media.type === 'label');
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
-        icon.title = 'Queue a local FLAC download with BeatportDL';
-        icon.setAttribute('aria-label', `Queue ${label} for local FLAC download`);
+        icon.title = 'Queue a local FLAC download with BeatportDL (Shift-click copies the URL)';
+        icon.setAttribute('aria-label', `Queue ${label} for local FLAC download; Shift-click copies its URL`);
         updateLabelParent(icon.parentElement);
     }
 
     function reconcileLinkIcons(root) {
         for (const icon of elementsMatching(root, `.${ICON_CLASS}:not(.${TITLE_ICON_CLASS})`)) {
             const link = icon.previousElementSibling;
-            if (!(link instanceof HTMLAnchorElement) || adjacentLinkIcons(link)[0] !== icon) {
+            if (!isAnchorNode(link) || adjacentLinkIcons(link)[0] !== icon) {
                 removeIcon(icon);
                 continue;
             }
@@ -310,7 +405,7 @@
     }
 
     function enhanceBeatportLinks(root = document) {
-        if (root instanceof HTMLAnchorElement) enhanceLink(root);
+        if (isAnchorNode(root)) enhanceLink(root);
         if (root.querySelectorAll) root.querySelectorAll('a[href]').forEach(enhanceLink);
         reconcileLinkIcons(root);
     }
@@ -429,7 +524,7 @@
             icon.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                createHazelJob(icon._tmBeatportMedia, icon);
+                handleMediaAction(event, icon._tmBeatportMedia, icon);
             });
             heading.insertAdjacentElement('afterend', icon);
         }
@@ -457,7 +552,7 @@
     const batcher = createFrameBatcher(flushRoots);
 
     function mutationRoot(node) {
-        if (node instanceof Element || node === document) return node;
+        if (isElementNode(node) || node === document) return node;
         return node?.parentElement || null;
     }
 
@@ -548,6 +643,13 @@
                 align-items: center !important; display: flex !important; flex-flow: row nowrap !important;
             }
             .${LABEL_PARENT_CLASS} > a { flex: 0 1 auto !important; min-width: 0 !important; width: auto !important; }
+            #${STATUS_ID} {
+                background: #0b2018; border: 1px solid #01ff95; border-radius: 7px; bottom: 18px;
+                color: #fff; font: 600 13px/1.35 system-ui, sans-serif; left: 50%; max-width: min(520px, 88vw);
+                padding: 8px 12px; position: fixed; transform: translateX(-50%); z-index: 2147483647;
+            }
+            #${STATUS_ID}.tm-beatportdl-status-error { border-color: #ff6b6b; }
+            #${STATUS_ID}[hidden] { display: none !important; }
         `;
         document.documentElement.appendChild(style);
     }
@@ -581,10 +683,15 @@
         cleanupObjectUrls,
         createFrameBatcher,
         createHazelJob,
+        confirmLargeJob,
+        copyMediaUrl,
         getBeatportMediaUrl,
         handleMutations,
+        isAnchorNode,
+        isElementNode,
         instance,
         mediaKey,
+        preferredMediaLink,
         pruneRoots,
         wrapHistoryMethod,
     };

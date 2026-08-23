@@ -8,12 +8,14 @@ This repository contains Gustavo's public Beatport-to-BeatportDL userscript. It 
 - Adds one page-title action for each supported Beatport media page, including library playlists.
 - Reconciles controls during Beatport single-page navigation without repeatedly rescanning the entire document.
 - Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
+- Deduplicates repeated links within the same list row and supports Shift-click to copy a canonical Beatport URL.
+- Shows accessible queued/copied feedback and confirms potentially large artist or label catalog jobs by default.
 
 ## Installation
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once.
 
-On first use, the loader downloads and validates the shared core. After that it starts the cached last-known-good core immediately at `document-start`, checks GitHub at most hourly using conditional requests, and keeps working from cache if GitHub is unavailable. A newer core takes effect on the next Beatport page load. Tampermonkey menu commands can check for a core update or show cache and rollback status.
+On first use, the loader downloads and validates the shared core. After that it starts the cached last-known-good core immediately at `document-start`, checks GitHub at most hourly using conditional requests, and keeps working from cache if GitHub is unavailable. A newer core takes effect on the next Beatport page load. Tampermonkey menu commands can bypass caches for a core update, show cache and rollback status, or toggle artist/label confirmation.
 
 The loader itself has separate Tampermonkey update metadata pointing to the loader file, so later loader-mechanism changes can update without replacing it with the core.
 
@@ -25,4 +27,4 @@ The repository contains no Beatport username, password, tokens, or BeatportDL co
 
 ## Development checks
 
-Run `npm test` with Node.js. The dependency-free tests cover accepted and rejected Beatport URLs, canonicalization, mutation batching, single-page navigation, singleton initialization, Hazel job format, duplicate prevention, and temporary URL cleanup.
+Run `npm test` with Node.js. The dependency-free tests cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
