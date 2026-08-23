@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.3.0
+// @version      1.4.0
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -23,8 +23,14 @@
     'use strict';
 
     const CONFIRM_LARGE_JOBS_KEY = 'beatportLoader.confirmLargeJobs.v1';
+    const LOCAL_ONLY_KEY = 'beatportLoader.localOnly.v1';
     globalThis.BEATPORTDL_CONFIG = Object.freeze({
-        confirmLargeJobs: GM_getValue(CONFIRM_LARGE_JOBS_KEY, true) !== false,
+        get confirmLargeJobs() {
+            return GM_getValue(CONFIRM_LARGE_JOBS_KEY, true) !== false;
+        },
+        get localOnly() {
+            return GM_getValue(LOCAL_ONLY_KEY, false) === true;
+        },
     });
 
     const SHARED_SCRIPT_URL = 'https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-hazel.user.js';
@@ -39,6 +45,7 @@
         lastAttempt: 'beatportLoader.sharedCore.lastAttempt.v1',
         rejectedSignature: 'beatportLoader.sharedCore.rejectedSignature.v1',
         confirmLargeJobs: CONFIRM_LARGE_JOBS_KEY,
+        localOnly: LOCAL_ONLY_KEY,
     });
 
     let activeSource = '';
@@ -255,6 +262,7 @@
             `Cached: ${primary ? sharedCoreVersion(primary) : 'none'}`,
             `Rollback: ${fallback ? sharedCoreVersion(fallback) : 'none'}`,
             `Confirm artist/label jobs: ${globalThis.BEATPORTDL_CONFIG.confirmLargeJobs ? 'yes' : 'no'}`,
+            `Local-only downloads: ${globalThis.BEATPORTDL_CONFIG.localOnly ? 'yes' : 'no'}`,
             `Last update check: ${lastAttempt ? new Date(lastAttempt).toLocaleString() : 'never'}`,
         ];
         notify(details.join('\n'));
@@ -263,7 +271,15 @@
     GM_registerMenuCommand('Toggle artist/label confirmation', () => {
         const next = !globalThis.BEATPORTDL_CONFIG.confirmLargeJobs;
         GM_setValue(STORAGE.confirmLargeJobs, next);
-        notify(`Artist/label confirmation is now ${next ? 'enabled' : 'disabled'}. Reload the page to apply it.`);
+        notify(`Artist/label confirmation is now ${next ? 'enabled' : 'disabled'}.`);
+    });
+
+    GM_registerMenuCommand('Toggle local-only downloads', () => {
+        const next = !globalThis.BEATPORTDL_CONFIG.localOnly;
+        GM_setValue(STORAGE.localOnly, next);
+        notify(next
+            ? 'Local-only downloads are enabled. New jobs will be converted and left in the local-only Downloads folder.'
+            : 'Local-only downloads are disabled. New jobs will use the normal library workflow.');
     });
 
     startCachedCore();

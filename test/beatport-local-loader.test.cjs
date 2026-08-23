@@ -19,6 +19,7 @@ const STORAGE = {
     etag: 'beatportLoader.sharedCore.etag.v1',
     lastAttempt: 'beatportLoader.sharedCore.lastAttempt.v1',
     rejected: 'beatportLoader.sharedCore.rejectedSignature.v1',
+    localOnly: 'beatportLoader.localOnly.v1',
 };
 
 function core(version, body = '') {
@@ -189,6 +190,21 @@ test('manual update bypasses local caches', () => {
     assert.match(request.url, /\?tm_refresh=\d+$/);
     assert.equal(request.headers['Cache-Control'], 'no-cache');
     request.onload({ status: 304, responseHeaders: '' });
+});
+
+test('local-only routing can be toggled immediately and persists', () => {
+    const harness = runLoader({
+        storageValues: {
+            [STORAGE.source]: core('1.8.0'),
+            [STORAGE.lastAttempt]: Date.now(),
+        },
+    });
+    assert.equal(harness.context.BEATPORTDL_CONFIG.localOnly, false);
+    harness.menus.get('Toggle local-only downloads')();
+    assert.equal(harness.context.BEATPORTDL_CONFIG.localOnly, true);
+    assert.equal(harness.storage.get(STORAGE.localOnly), true);
+    harness.menus.get('Toggle local-only downloads')();
+    assert.equal(harness.context.BEATPORTDL_CONFIG.localOnly, false);
 });
 
 test('non-initializing core is rejected instead of being marked active', () => {
