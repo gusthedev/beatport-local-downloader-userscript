@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.8.0
+// @version      1.8.1
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,6 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
+    const CORE_VERSION = '1.8.1';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -250,6 +251,14 @@
         }
     }
 
+    function claimCurrentIcon(icon) {
+        if (!icon || icon.dataset?.tmBeatportCoreVersion === CORE_VERSION) return icon;
+        // A different userscript sandbox may have created this DOM node. Reusing
+        // it would also reuse that older core's click listener, so replace it.
+        removeIcon(icon);
+        return null;
+    }
+
     function buildHazelJob(media, date = new Date(), localOnly = loaderConfig.localOnly === true) {
         const timestamp = date.toISOString().replace(/[^0-9]/g, '').slice(0, 17);
         const prefix = localOnly ? 'beatportdl-localonly' : 'beatportdl';
@@ -362,7 +371,7 @@
 
         const media = getEligibleMedia(link);
         const icons = adjacentLinkIcons(link);
-        const existingIcon = icons.shift() || null;
+        const existingIcon = claimCurrentIcon(icons.shift() || null);
         icons.forEach(removeIcon);
         const containsArtwork = Boolean(link.querySelector('img, picture'));
 
@@ -387,6 +396,7 @@
         }
 
         icon.classList.toggle('tm-beatportdl-label-icon', media.type === 'label');
+        icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
         icon.title = 'Queue a local FLAC download with BeatportDL (Shift-click copies the URL)';
@@ -517,7 +527,9 @@
         }
 
         const candidates = Array.from(document.querySelectorAll(`.${TITLE_ICON_CLASS}`));
-        let icon = candidates.find((candidate) => candidate.previousElementSibling === heading) || null;
+        let icon = claimCurrentIcon(
+            candidates.find((candidate) => candidate.previousElementSibling === heading) || null
+        );
         if (!icon) {
             icon = document.createElement('button');
             icon.className = `${ICON_CLASS} ${TITLE_ICON_CLASS}`;
@@ -538,6 +550,7 @@
         instance.activeTitleIcon = icon;
         instance.activeTitleParent = parent;
         parent.classList.add(TITLE_WRAP_CLASS);
+        icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
         const description = itemDescription(media);
@@ -684,6 +697,7 @@
         buildHazelJob,
         claimJob,
         cleanupObjectUrls,
+        claimCurrentIcon,
         createFrameBatcher,
         createHazelJob,
         confirmLargeJob,
