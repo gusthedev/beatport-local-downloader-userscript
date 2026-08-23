@@ -21,7 +21,7 @@ function classList() {
     };
 }
 
-function createContext({ confirmResult = true } = {}) {
+function createContext({ confirmResult = true, localOnly = false } = {}) {
     const downloads = [];
     const copied = [];
     const revoked = [];
@@ -73,6 +73,7 @@ function createContext({ confirmResult = true } = {}) {
         Element: TestElement,
         HTMLAnchorElement: TestAnchor,
         URL: TestURL,
+        BEATPORTDL_CONFIG: { localOnly },
         __TM_BEATPORTDL_TEST_MODE__: { skipStart: true },
         cancelAnimationFrame: () => {},
         clearTimeout(id) { timers.delete(id); },
@@ -217,6 +218,22 @@ test('Hazel jobs retain the local text-file contract and reject rapid duplicates
     assert.equal(hooks.createHazelJob(media, fakeIcon()), false);
     hooks.cleanupObjectUrls();
     assert.deepEqual(revoked, ['blob:test-1']);
+});
+
+test('local-only mode changes only the routing marker in the job filename', () => {
+    const { downloads, hooks } = createContext({ localOnly: true });
+    const media = {
+        id: '654',
+        type: 'track',
+        url: 'https://www.beatport.com/track/a-track/654',
+    };
+    const job = hooks.buildHazelJob(media, new Date('2026-08-12T21:22:23.456Z'));
+    assert.deepEqual({ ...job }, {
+        contents: 'https://www.beatport.com/track/a-track/654\n',
+        filename: 'beatportdl-localonly-track-654-20260812212223456.txt',
+    });
+    assert.equal(hooks.createHazelJob(media, fakeIcon()), true);
+    assert.equal(downloads[0].download.startsWith('beatportdl-localonly-track-654-'), true);
 });
 
 test('recognizes cross-realm anchor wrappers without instanceof checks', () => {

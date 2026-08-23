@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.7.0
+// @version      1.8.0
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -250,11 +250,12 @@
         }
     }
 
-    function buildHazelJob(media, date = new Date()) {
+    function buildHazelJob(media, date = new Date(), localOnly = loaderConfig.localOnly === true) {
         const timestamp = date.toISOString().replace(/[^0-9]/g, '').slice(0, 17);
+        const prefix = localOnly ? 'beatportdl-localonly' : 'beatportdl';
         return {
             contents: `${media.url}\n`,
-            filename: `beatportdl-${media.type}-${media.id}-${timestamp}.txt`,
+            filename: `${prefix}-${media.type}-${media.id}-${timestamp}.txt`,
         };
     }
 
@@ -307,7 +308,9 @@
             download.click();
             scheduleObjectUrlCleanup(objectUrl);
             setFeedback(icon, true);
-            showStatus(`Queued ${job.filename}`);
+            showStatus(loaderConfig.localOnly === true
+                ? `Queued local-only ${media.type} download`
+                : `Queued ${job.filename}`);
             return true;
         } catch {
             if (objectUrl) revokeObjectUrl(objectUrl);

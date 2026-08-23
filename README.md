@@ -10,12 +10,13 @@ This repository contains Gustavo's public Beatport-to-BeatportDL userscript. It 
 - Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
 - Deduplicates repeated links within the same list row and supports Shift-click to copy a canonical Beatport URL.
 - Shows accessible queued/copied feedback and confirms potentially large artist or label catalog jobs by default.
+- Provides a persistent local-only toggle. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
 
 ## Installation
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once.
 
-On first use, the loader downloads and validates the shared core. After that it starts the cached last-known-good core immediately at `document-start`, checks GitHub at most hourly using conditional requests, and keeps working from cache if GitHub is unavailable. A newer core takes effect on the next Beatport page load. Tampermonkey menu commands can bypass caches for a core update, show cache and rollback status, or toggle artist/label confirmation.
+On first use, the loader downloads and validates the shared core. After that it starts the cached last-known-good core immediately at `document-start`, checks GitHub at most hourly using conditional requests, and keeps working from cache if GitHub is unavailable. A newer core takes effect on the next Beatport page load. Tampermonkey menu commands can bypass caches for a core update, show cache and rollback status, toggle artist/label confirmation, or switch new jobs between normal and local-only routing.
 
 The loader itself has separate Tampermonkey update metadata pointing to the loader file, so later loader-mechanism changes can update without replacing it with the core.
 
@@ -23,7 +24,7 @@ Disable or remove older copies of **Beatport Local FLAC Download (Hazel)** after
 
 ## Privacy
 
-The repository contains no Beatport username, password, tokens, or BeatportDL configuration. Credentials and download processing remain local to the Mac.
+The repository contains no Beatport username, password, tokens, filesystem paths, or BeatportDL configuration. The public job contains only a canonical Beatport URL and an optional local-only marker in its filename; credentials, destinations, and download processing remain local to the Mac.
 
 ## Development checks
 
