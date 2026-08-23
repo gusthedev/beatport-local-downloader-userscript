@@ -21,15 +21,24 @@ function classList() {
     };
 }
 
-function createContext() {
+function createContext({ confirmResult = true } = {}) {
     const downloads = [];
+    const copied = [];
     const revoked = [];
     const timers = new Map();
     let nextTimer = 1;
     let nextObjectUrl = 1;
 
-    class TestElement {}
-    class TestAnchor extends TestElement {}
+    class TestElement {
+        constructor(tagName = 'DIV') {
+            this.nodeType = 1;
+            this.tagName = tagName;
+        }
+        querySelectorAll() { return []; }
+    }
+    class TestAnchor extends TestElement {
+        constructor() { super('A'); }
+    }
     class TestURL extends URL {}
     TestURL.createObjectURL = () => `blob:test-${nextObjectUrl++}`;
     TestURL.revokeObjectURL = (value) => revoked.push(value);
@@ -37,11 +46,12 @@ function createContext() {
     const documentElement = {
         appendChild(element) {
             element.isConnected = true;
-            downloads.push(element);
+            if (element.tagName === 'A') downloads.push(element);
         },
     };
     const document = {
         documentElement,
+        getElementById() { return null; },
         createElement(tagName) {
             return {
                 attributes: {},
@@ -49,6 +59,8 @@ function createContext() {
                 click() { this.clicked = true; },
                 download: '',
                 href: '',
+                hidden: false,
+                id: '',
                 remove() { this.removed = true; },
                 setAttribute(name, value) { this.attributes[name] = value; },
                 style: {},
@@ -67,6 +79,8 @@ function createContext() {
         document,
         location: { href: 'https://www.beatport.com/' },
         requestAnimationFrame: () => 1,
+        GM_setClipboard(value) { copied.push(value); },
+        confirm: () => confirmResult,
         setTimeout(callback) {
             const id = nextTimer++;
             timers.set(id, callback);
@@ -78,6 +92,7 @@ function createContext() {
     vm.runInContext(source, context, { filename: 'beatport-local-hazel.user.js' });
     return {
         context,
+        copied,
         downloads,
         hooks: context.__TM_BEATPORTDL_TEST_HOOKS__,
         revoked,
@@ -202,4 +217,59 @@ test('Hazel jobs retain the local text-file contract and reject rapid duplicates
     assert.equal(hooks.createHazelJob(media, fakeIcon()), false);
     hooks.cleanupObjectUrls();
     assert.deepEqual(revoked, ['blob:test-1']);
+});
+
+test('recognizes cross-realm anchor wrappers without instanceof checks', () => {
+    const { hooks } = createContext();
+    const anchor = {
+        nodeType: 1,
+        tagName: 'a',
+        querySelectorAll() {},
+    };
+    assert.equal(hooks.isElementNode(anchor), true);
+    assert.equal(hooks.isAnchorNode(anchor), true);
+});
+
+test('Shift-click copy and large-catalog confirmation are available', () => {
+    const { copied, hooks } = createContext();
+    const media = {
+        id: '42',
+        type: 'artist',
+        url: 'https://www.beatport.com/artist/example/42',
+    };
+    const icon = fakeIcon();
+    assert.equal(hooks.confirmLargeJob(media), true);
+    assert.equal(hooks.copyMediaUrl(media, icon), true);
+    assert.deepEqual(copied, [media.url]);
+    assert.equal(icon.disabled, true);
+});
+
+test('large catalog jobs can be cancelled before a Hazel file is created', () => {
+    const { hooks } = createContext({ confirmResult: false });
+    assert.equal(hooks.confirmLargeJob({
+        id: '42',
+        type: 'label',
+        url: 'https://www.beatport.com/label/example/42',
+    }), false);
+});
+
+test('chooses one best text link for repeated media within a row', () => {
+    const { hooks } = createContext();
+    const item = { querySelectorAll: () => [shortLink, descriptiveLink] };
+    const makeLink = (text) => ({
+        nodeType: 1,
+        tagName: 'A',
+        textContent: text,
+        getAttribute: () => '/track/example/42',
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        closest(selector) {
+            return selector.includes('main') ? { nodeType: 1 } : item;
+        },
+    });
+    const shortLink = makeLink('Track');
+    const descriptiveLink = makeLink('Track Name (Extended Mix)');
+    const media = hooks.getBeatportMediaUrl('/track/example/42');
+    assert.equal(hooks.preferredMediaLink(shortLink, media), descriptiveLink);
+    assert.equal(hooks.preferredMediaLink(descriptiveLink, media), descriptiveLink);
 });
