@@ -221,3 +221,19 @@ test('non-initializing core is rejected instead of being marked active', () => {
     assert.equal(harness.storage.has(STORAGE.source), false);
     assert.equal(harness.context.__beatportCoreRuns[0], '1.7.0');
 });
+
+
+test('a rejected update remains rejected after another page starts the restored core', () => {
+    const broken = core('9.0.0', "throw new Error('broken');");
+    const good = core('8.0.0');
+    const first = runLoader({ storageValues: {
+        [STORAGE.source]: broken, [STORAGE.fallback]: good, [STORAGE.lastAttempt]: Date.now()
+    }});
+    const rejected = first.storage.get(STORAGE.rejected);
+    assert.ok(rejected);
+    const second = runLoader({ storageValues: { ...Object.fromEntries(first.storage), [STORAGE.lastAttempt]: 0 },
+        response: { status: 200, responseText: broken, responseHeaders: '' }
+    });
+    assert.equal(second.storage.get(STORAGE.source), good);
+    assert.equal(second.storage.get(STORAGE.rejected), rejected);
+});

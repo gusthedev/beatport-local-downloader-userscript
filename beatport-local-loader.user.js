@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.4.0
+// @version      1.5.0
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -9,9 +9,12 @@
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
+// @grant        GM_listValues
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_removeValueChangeListener
+// @grant        GM_addValueChangeListener
 // @grant        GM_setClipboard
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
@@ -24,10 +27,20 @@
 
     const CONFIRM_LARGE_JOBS_KEY = 'beatportLoader.confirmLargeJobs.v1';
     const LOCAL_ONLY_KEY = 'beatportLoader.localOnly.v1';
+    const modeListeners = new Set();
+    function announceMode() { modeListeners.forEach(callback => callback()); }
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(LOCAL_ONLY_KEY, announceMode);
+    }
     globalThis.BEATPORTDL_CONFIG = Object.freeze({
         get confirmLargeJobs() {
             return GM_getValue(CONFIRM_LARGE_JOBS_KEY, true) !== false;
         },
+        setLocalOnly(value) {
+            GM_setValue(LOCAL_ONLY_KEY, value === true);
+            announceMode();
+        },
+        onModeChange(callback) { modeListeners.add(callback); },
         get localOnly() {
             return GM_getValue(LOCAL_ONLY_KEY, false) === true;
         },
@@ -107,7 +120,10 @@
             eval(`${source}\n//# sourceURL=beatport-local-hazel.user.js`);
             if (!globalThis[INSTANCE_KEY]) throw new Error('The shared core returned without initializing.');
             activeSource = source;
-            if (clearRejected) GM_deleteValue(STORAGE.rejectedSignature);
+            // Starting an older working version must not pardon a rejected update.
+            if (clearRejected && GM_getValue(STORAGE.rejectedSignature, '') === sourceSignature(source)) {
+                GM_deleteValue(STORAGE.rejectedSignature);
+            }
             return true;
         } catch (error) {
             GM_setValue(STORAGE.rejectedSignature, sourceSignature(source));
@@ -225,7 +241,6 @@
                         return;
                     }
                     executedNow = true;
-                    GM_deleteValue(STORAGE.rejectedSignature);
                 }
 
                 cacheSharedCore(nextSource, previousSource, response);
@@ -276,7 +291,7 @@
 
     GM_registerMenuCommand('Toggle local-only downloads', () => {
         const next = !globalThis.BEATPORTDL_CONFIG.localOnly;
-        GM_setValue(STORAGE.localOnly, next);
+        globalThis.BEATPORTDL_CONFIG.setLocalOnly(next);
         notify(next
             ? 'Local-only downloads are enabled. New jobs will be converted and left in the local-only Downloads folder.'
             : 'Local-only downloads are disabled. New jobs will use the normal library workflow.');

@@ -9,8 +9,10 @@ This repository contains Gustavo's public Beatport-to-BeatportDL userscript. It 
 - Reconciles controls during Beatport single-page navigation without repeatedly rescanning the entire document.
 - Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
 - Deduplicates repeated links within the same list row and supports Shift-click to copy a canonical Beatport URL.
-- Shows accessible queued/copied feedback and confirms potentially large artist or label catalog jobs by default.
-- Provides a persistent local-only toggle. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
+- Shows accurate job-file-requested/copied feedback and confirms potentially large artist or label catalog jobs by default.
+- Remembers recently submitted items for 24 hours across navigation and tabs, and confirms deliberate resubmission. This records a requested job file, not downloader completion.
+- Processes repeated row links once per batch and limits title-control work to relevant changes.
+- Provides a visible, persistent local-only toggle synchronized with the loader menu. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
 
 ## Installation
 
@@ -28,4 +30,6 @@ The repository contains no Beatport username, password, tokens, filesystem paths
 
 ## Development checks
 
-Run `npm test` with Node.js. The dependency-free tests cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
+Run `npm ci` followed by `npm test` with Node.js 18 or newer. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
+
+Update the loader to 1.5.0 for cross-tab indicators and the visible mode switch. Older loaders continue to support download buttons with their existing routing settings. Storage listeners are released when their media controls leave the page.

@@ -249,7 +249,7 @@ test('stale buttons are replaced so an older click handler cannot keep control',
     assert.equal(removed, true);
 
     const currentIcon = {
-        dataset: { tmBeatportCoreVersion: '1.8.1' },
+        dataset: { tmBeatportCoreVersion: source.match(/const CORE_VERSION = '([^']+)'/)[1] },
     };
     assert.equal(hooks.claimCurrentIcon(currentIcon), currentIcon);
 });
