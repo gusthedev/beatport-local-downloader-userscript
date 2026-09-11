@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.9.1
+// @version      1.9.2
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '1.9.1';
+    const CORE_VERSION = '1.9.2';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -836,7 +836,7 @@
             }
             .${LABEL_PARENT_CLASS} > a { flex: 0 1 auto !important; min-width: 0 !important; width: auto !important; }
             #${STATUS_ID} {
-                background: #0b2018; border: 1px solid #01ff95; border-radius: 7px; bottom: 18px;
+                background: #0b2018; border: 1px solid #01ff95; border-radius: 7px; bottom: 110px;
                 color: #fff; font: 600 13px/1.35 system-ui, sans-serif; left: 50%; max-width: min(520px, 88vw);
                 padding: 8px 12px; position: fixed; transform: translateX(-50%); z-index: 2147483647;
             }

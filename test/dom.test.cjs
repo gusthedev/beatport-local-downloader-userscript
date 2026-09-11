@@ -56,4 +56,8 @@ test('recent submissions require confirmation while Shift-click still copies wit
  assert.equal(confirms,1);assert.equal(clickedDownloads,0);
  button.dispatchEvent(new h.w.MouseEvent('click',{bubbles:true,shiftKey:true}));
  assert.equal(confirms,1);assert.equal(clickedDownloads,0);assert.equal(copied,'https://www.beatport.com/track/test/123');
+ const status=h.w.document.getElementById('tm-beatportdl-status');
+ assert.equal(status.hidden,false);
+ assert.equal(h.w.getComputedStyle(status).bottom,'110px');
+ assert.equal(h.w.getComputedStyle(status).bottom,h.w.getComputedStyle(h.w.document.getElementById('tm-beatportdl-mode')).bottom);
 });
