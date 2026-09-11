@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.5.0
+// @version      1.5.1
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -16,6 +16,7 @@
 // @grant        GM_removeValueChangeListener
 // @grant        GM_addValueChangeListener
 // @grant        GM_setClipboard
+// @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @downloadURL  https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js

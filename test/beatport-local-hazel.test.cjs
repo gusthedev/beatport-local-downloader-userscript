@@ -6,6 +6,89 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'beatport-local-hazel.user.js'), 'utf8');
 
+const safari27 = 'Mozilla/5.0 (Macintosh) AppleWebKit/625 Version/27.0 Safari/625';
+
+function safariPlayerFixture({ active = false } = {}) {
+    class Hls {}
+    Hls.DefaultConfig = { preferManagedMediaSource: true };
+    let destroyed = 0;
+    class Adapter {
+        constructor(media, context, onError) {
+            this.media = media;
+            this.context = context;
+            this.onError = onError;
+            this._hls = { constructor: Hls, config: { ...Hls.DefaultConfig } };
+        }
+        destroy() { destroyed += 1; }
+    }
+    const media = {}, audioContext = {}, onError = () => {};
+    const adapter = new Adapter(media, audioContext, onError);
+    const player = {
+        _mediaElement: media, _audioContext: audioContext, _onError: onError,
+        _audioAdapters: { HlsAdapter: adapter },
+        getTrack() { return active ? { id: 1 } : undefined; },
+    };
+    const page = { navigator: { userAgent: safari27 }, MediaSource: class {} };
+    return { page, player, adapter, Hls, destroyed: () => destroyed };
+}
+
+test('Safari 27 player published after document-start uses standard buffering from its first stream', () => {
+    const { hooks } = createContext();
+    const f = safariPlayerFixture();
+    hooks.installSafariPlaybackFix(f.page);
+    f.page.BPPlayer = f.player;
+    const replacement = f.player._audioAdapters.HlsAdapter;
+    assert.notEqual(replacement, f.adapter);
+    assert.equal(replacement._hls.config.preferManagedMediaSource, false);
+    assert.equal(replacement.media, f.player._mediaElement);
+    assert.equal(replacement.context, f.player._audioContext);
+    assert.equal(replacement.onError, f.player._onError);
+    assert.equal(f.destroyed(), 1);
+    f.page.BPPlayer = f.player;
+    hooks.installSafariPlaybackFix(f.page);
+    assert.equal(f.destroyed(), 1);
+    assert.equal(f.page.__beatportSafariPlaybackFix.applied, true);
+});
+
+test('Safari compatibility leaves active playback intact and configures subsequent HLS instances', () => {
+    const { hooks } = createContext();
+    const f = safariPlayerFixture({ active: true });
+    f.page.BPPlayer = f.player;
+    hooks.installSafariPlaybackFix(f.page);
+    assert.equal(f.player._audioAdapters.HlsAdapter, f.adapter);
+    assert.equal(f.destroyed(), 0);
+    assert.equal(f.Hls.DefaultConfig.preferManagedMediaSource, false);
+});
+
+test('Safari compatibility does not change Chrome, older Safari, or browsers without standard MediaSource', () => {
+    const { hooks } = createContext();
+    for (const agent of [safari27.replace('27.0', '26.0'), 'Mozilla/5.0 Chrome/153.0 Safari/537.36']) {
+        const f = safariPlayerFixture();
+        f.page.navigator.userAgent = agent;
+        hooks.installSafariPlaybackFix(f.page);
+        assert.equal(f.page.__beatportSafariPlaybackFix, undefined);
+        assert.equal(Object.getOwnPropertyDescriptor(f.page, 'BPPlayer'), undefined);
+        assert.equal(f.Hls.DefaultConfig.preferManagedMediaSource, true);
+    }
+    const f = safariPlayerFixture();
+    delete f.page.MediaSource;
+    hooks.installSafariPlaybackFix(f.page);
+    assert.equal(f.page.__beatportSafariPlaybackFix, undefined);
+});
+
+test('Safari compatibility preserves existing page-owned accessors and ignores incompatible players', () => {
+    const { hooks } = createContext();
+    const f = safariPlayerFixture({ active: true });
+    const getter = () => f.player;
+    Object.defineProperty(f.page, 'BPPlayer', { get: getter, configurable: false });
+    hooks.installSafariPlaybackFix(f.page);
+    assert.equal(Object.getOwnPropertyDescriptor(f.page, 'BPPlayer').get, getter);
+    const other = safariPlayerFixture();
+    hooks.installSafariPlaybackFix(other.page);
+    other.page.BPPlayer = {};
+    assert.equal(other.page.__beatportSafariPlaybackFix.applied, false);
+});
+
 function classList() {
     const values = new Set();
     return {

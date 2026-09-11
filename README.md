@@ -13,6 +13,7 @@ This repository contains Gustavo's public Beatport-to-BeatportDL userscript. It 
 - Remembers recently submitted items for 24 hours across navigation and tabs, and confirms deliberate resubmission. This records a requested job file, not downloader completion.
 - Processes repeated row links once per batch and limits title-control work to relevant changes.
 - Provides a visible, persistent local-only toggle synchronized with the loader menu. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
+- On Safari 27 only, selects standard MediaSource buffering for Beatport's signed-in HLS player to prevent seeks beyond the buffered audio from freezing. Chrome and other browser versions are untouched; no browser security or privacy settings are changed.
 
 ## Installation
 
@@ -33,3 +34,5 @@ The repository contains no Beatport username, password, tokens, filesystem paths
 Run `npm ci` followed by `npm test` with Node.js 18 or newer. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
 
 Update the loader to 1.5.0 for cross-tab indicators and the visible mode switch. Older loaders continue to support download buttons with their existing routing settings. Storage listeners are released when their media controls leave the page.
+
+Update the loader to 1.5.1 for the Safari 27 playback fix in core 1.9.1. This grants access to Beatport's page player through `unsafeWindow`; credentials remain local and are neither read nor sent by the fix. Remove the temporary standalone **Beatport Safari Playback Fix** if previously installed, then reload Beatport. When the core starts after playback has already begun, the corrected buffering preference takes effect on the next track load.

@@ -1,20 +1,20 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.9.0
+// @version      1.9.1
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
 // @match        https://beatport.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '1.9.0';
+    const CORE_VERSION = '1.9.1';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -25,6 +25,60 @@
         if (TEST_CONFIG) globalThis.__TM_BEATPORTDL_TEST_HOOKS__ = existingInstance.testHooks;
         return;
     }
+
+    function installSafariPlaybackFix(page) {
+        const agent = page.navigator?.userAgent || '';
+        const safariVersion = agent.match(/Version\/(\d+).*Safari\//);
+        if (!safariVersion || Number(safariVersion[1]) !== 27
+            || /Chrome|Chromium|CriOS|Edg|OPR|FxiOS/.test(agent)
+            || !page.MediaSource || page.__beatportSafariPlaybackFix) return;
+
+        const state = { version: '1.0.1', applied: false };
+        const seen = new WeakSet();
+        function configure(player) {
+            if (!player || typeof player !== 'object' || seen.has(player)) return;
+            const adapter = player._audioAdapters?.HlsAdapter;
+            const Hls = adapter?._hls?.constructor;
+            if (!Hls?.DefaultConfig || !('preferManagedMediaSource' in Hls.DefaultConfig)) return;
+            // Safari 27 can leave an out-of-buffer seek pending indefinitely
+            // with ManagedMediaSource. Standard MediaSource passes the same seek.
+            // Change only Beatport's HLS preference, not browser security settings.
+            Hls.DefaultConfig.preferManagedMediaSource = false;
+            // BPPlayer is published after its first adapters are constructed.
+            // Replace only the unused HLS adapter; never interrupt an active track.
+            if (typeof player.getTrack === 'function' && !player.getTrack()
+                && adapter._hls.config?.preferManagedMediaSource !== false
+                && typeof adapter.destroy === 'function' && typeof adapter.constructor === 'function') {
+                const replacement = new adapter.constructor(player._mediaElement, player._audioContext, player._onError);
+                adapter.destroy();
+                player._audioAdapters.HlsAdapter = replacement;
+            }
+            seen.add(player);
+            state.applied = true;
+            console.info('[Beatport loader] Safari 27: standard media buffering enabled.');
+        }
+        function safelyConfigure(player) {
+            try { configure(player); }
+            catch (error) { console.warn('[Beatport loader] Safari playback configuration failed:', error); }
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(page, 'BPPlayer');
+        if (descriptor && (!descriptor.configurable || descriptor.get || descriptor.set)) {
+            safelyConfigure(page.BPPlayer);
+        } else {
+            let player = descriptor?.value;
+            Object.defineProperty(page, 'BPPlayer', {
+                configurable: true,
+                enumerable: descriptor?.enumerable ?? true,
+                get() { return player; },
+                set(value) { player = value; safelyConfigure(value); },
+            });
+            safelyConfigure(player);
+        }
+        page.__beatportSafariPlaybackFix = state;
+    }
+
+    try { installSafariPlaybackFix(typeof unsafeWindow === 'object' ? unsafeWindow : window); }
+    catch (error) { console.warn('[Beatport loader] Safari playback compatibility unavailable:', error); }
 
     const ICON_CLASS = 'tm-beatportdl-local-icon';
     const TITLE_ICON_CLASS = 'tm-beatportdl-page-title-icon';
@@ -763,7 +817,7 @@
                 white-space: nowrap; width: 16px !important;
             }
             #${MODE_ID} {
-                position: fixed; right: 16px; bottom: 18px; z-index: 2147483646;
+                position: fixed; right: 16px; bottom: 110px; z-index: 2147483646;
                 padding: 8px 12px; border: 1px solid #01ff95; border-radius: 7px;
                 background: #0b2018; color: #fff; font: 600 12px system-ui; cursor: pointer;
             }
@@ -824,6 +878,7 @@
     }
 
     instance.testHooks = {
+        installSafariPlaybackFix,
         submissionTime,
         recordSubmission,
         pruneSubmissionStorage,

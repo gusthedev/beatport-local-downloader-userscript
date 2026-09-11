@@ -37,6 +37,7 @@ test('submission state survives navigation and receives cross-tab updates; expir
 });
 test('visible mode control follows clicks and loader updates; legacy loaders remain usable',async t=>{
  const h=setup(t);await h.settle();const mode=h.w.document.getElementById('tm-beatportdl-mode');
+ assert.equal(h.w.getComputedStyle(mode).bottom,'110px');
  assert.match(mode.textContent,/Normal library/);mode.click();assert.match(mode.textContent,/Local only/);
  h.w.BEATPORTDL_CONFIG.setLocalOnly(false);assert.match(mode.textContent,/Normal library/);
  const old=setup(t,new Map(),true);await old.settle();assert.equal(old.w.document.getElementById('tm-beatportdl-mode'),null);assert.equal(old.w.document.querySelectorAll('article button').length,1);
