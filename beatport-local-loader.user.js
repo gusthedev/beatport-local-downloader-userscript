@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.5.1
+// @version      1.5.2
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -17,7 +17,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
-// @connect      raw.githubusercontent.com
+// @connect      api.github.com
 // @updateURL    https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @downloadURL  https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @noframes
@@ -47,7 +47,10 @@
         },
     });
 
-    const SHARED_SCRIPT_URL = 'https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-hazel.user.js';
+    // The raw.githubusercontent.com edge can serve an older branch revision for
+    // several minutes. GitHub's contents API with the raw media type resolves
+    // the current branch ref directly.
+    const SHARED_SCRIPT_URL = 'https://api.github.com/repos/gusthedev/beatport-local-downloader-userscript/contents/beatport-local-hazel.user.js?ref=main';
     const UPDATE_INTERVAL = 60 * 60 * 1000;
     const EMPTY_CACHE_RETRY_INTERVAL = 5 * 60 * 1000;
     const REQUEST_TIMEOUT = 15_000;
@@ -192,7 +195,11 @@
         const { primary, fallback } = readCachedSources();
         const previousSource = primary || fallback;
         const etag = primary ? GM_getValue(STORAGE.etag, '') : '';
-        const headers = etag ? { 'If-None-Match': etag } : {};
+        const headers = {
+            Accept: 'application/vnd.github.raw+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+            ...(etag ? { 'If-None-Match': etag } : {})
+        };
         if (manual) {
             headers['Cache-Control'] = 'no-cache';
             headers.Pragma = 'no-cache';
@@ -207,7 +214,7 @@
 
         GM_xmlhttpRequest({
             method: 'GET',
-            url: manual ? `${SHARED_SCRIPT_URL}?tm_refresh=${Date.now()}` : SHARED_SCRIPT_URL,
+            url: manual ? `${SHARED_SCRIPT_URL}&tm_refresh=${Date.now()}` : SHARED_SCRIPT_URL,
             headers,
             timeout: REQUEST_TIMEOUT,
             onload(response) {

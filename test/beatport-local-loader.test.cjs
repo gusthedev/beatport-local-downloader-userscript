@@ -12,6 +12,7 @@ const realCoreSource = fs.readFileSync(
     path.join(__dirname, '..', 'beatport-local-hazel.user.js'),
     'utf8',
 );
+const SHARED_SCRIPT_URL = 'https://api.github.com/repos/gusthedev/beatport-local-downloader-userscript/contents/beatport-local-hazel.user.js?ref=main';
 
 const STORAGE = {
     source: 'beatportLoader.sharedCore.source.v1',
@@ -71,7 +72,12 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '' } 
     return { alerts, context, menus, requests, storage };
 }
 
-test('cold first install validates, caches, and starts the core once', () => {
+test('loader metadata permits the GitHub Contents API', () => {
+    assert.match(loaderSource, /^\/\/\s*@connect\s+api\.github\.com\s*$/m);
+    assert.doesNotMatch(loaderSource, /^\/\/\s*@connect\s+raw\.githubusercontent\.com\s*$/m);
+});
+
+test('cold first install fetches current-branch raw source, caches, and starts the core once', () => {
     const source = core('1.6.0');
     const harness = runLoader({
         response: {
@@ -85,7 +91,11 @@ test('cold first install validates, caches, and starts the core once', () => {
     assert.equal(harness.storage.get(STORAGE.source), source);
     assert.equal(harness.storage.get(STORAGE.etag), '"core-160"');
     assert.equal(harness.requests.length, 1);
-    assert.equal(harness.requests[0].url.includes('?'), false);
+    assert.equal(harness.requests[0].url, SHARED_SCRIPT_URL);
+    assert.equal(harness.requests[0].method, 'GET');
+    assert.equal(harness.requests[0].headers.Accept, 'application/vnd.github.raw+json');
+    assert.equal(harness.requests[0].headers['X-GitHub-Api-Version'], '2022-11-28');
+    assert.equal(harness.requests[0].headers['If-None-Match'], undefined);
     assert.equal(harness.requests[0].headers['Cache-Control'], undefined);
 });
 
@@ -136,6 +146,8 @@ test('a warm update is cached for the next page without double execution', () =>
     assert.equal(harness.storage.get(STORAGE.source), next);
     assert.equal(harness.storage.get(STORAGE.fallback), current);
     assert.equal(harness.requests[0].headers['If-None-Match'], '"core-153"');
+    assert.equal(harness.requests[0].url, SHARED_SCRIPT_URL);
+    assert.equal(harness.requests[0].headers.Accept, 'application/vnd.github.raw+json');
 });
 
 test('network failure leaves the valid cached core active', () => {
@@ -185,11 +197,29 @@ test('manual update bypasses local caches', () => {
             [STORAGE.lastAttempt]: Date.now(),
         },
     });
+    assert.equal(harness.requests.length, 0);
+    const beforeRefresh = Date.now();
     harness.menus.get('Check for shared-core updates now')();
+    const afterRefresh = Date.now();
+    assert.equal(harness.requests.length, 1);
     const request = harness.requests.at(-1);
-    assert.match(request.url, /\?tm_refresh=\d+$/);
+    assert.ok(request.url.startsWith(`${SHARED_SCRIPT_URL}&tm_refresh=`));
+    const url = new URL(request.url);
+    assert.deepEqual([...url.searchParams.keys()], ['ref', 'tm_refresh']);
+    assert.equal(url.searchParams.get('ref'), 'main');
+    assert.match(url.searchParams.get('tm_refresh'), /^\d+$/);
+    const refreshedAt = Number(url.searchParams.get('tm_refresh'));
+    assert.ok(refreshedAt >= beforeRefresh && refreshedAt <= afterRefresh);
+    assert.equal(request.headers.Accept, 'application/vnd.github.raw+json');
+    assert.equal(request.headers['X-GitHub-Api-Version'], '2022-11-28');
+    assert.equal(request.headers['If-None-Match'], '"core-160"');
     assert.equal(request.headers['Cache-Control'], 'no-cache');
+    assert.equal(request.headers.Pragma, 'no-cache');
     request.onload({ status: 304, responseHeaders: '' });
+    assert.equal(harness.storage.get(STORAGE.source), current);
+    assert.equal(harness.storage.get(STORAGE.etag), '"core-160"');
+    assert.deepEqual(Array.from(harness.context.__beatportCoreRuns), ['1.6.0']);
+    assert.match(harness.alerts.at(-1), /The shared core is current/);
 });
 
 test('local-only routing can be toggled immediately and persists', () => {
