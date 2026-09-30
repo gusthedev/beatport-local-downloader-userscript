@@ -82,6 +82,9 @@ test('private installer seeds or repairs pairing while public updates preserve i
     const key='beatportLoader.helperToken.v1', token='a'.repeat(64);
     assert.equal(runLoader({seed:token}).storage.get(key),token);
     assert.equal(runLoader({seed:token,storageValues:{[key]:'old-key'}}).storage.get(key),token);
+    const existing=runLoader({seed:token,storageValues:{[key]:'old-key',[STORAGE.localOnly]:true,'beatportLoader.confirmLargeJobs.v1':false}});
+    assert.equal(existing.storage.get(STORAGE.localOnly),true);
+    assert.equal(existing.storage.get('beatportLoader.confirmLargeJobs.v1'),false);
     assert.equal(runLoader({storageValues:{[key]:token}}).storage.get(key),token);
     assert.equal(runLoader().storage.has(key),false);
 });

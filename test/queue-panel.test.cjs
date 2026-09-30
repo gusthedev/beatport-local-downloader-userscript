@@ -118,7 +118,8 @@ test('automatic pairing needs no key and targets the requesting browser with one
     h.shadow.querySelector('[data-auto-pair]').click();h.shadow.querySelector('[data-auto-pair]').click();
     assert.equal(h.downloads.length,1);
     assert.match(h.downloads[0].download,/^beatportdl-wake-pair-chrome-\d+\.txt$/);
-    assert.match(h.shadow.querySelector('[data-message]').textContent,/Approve Update \/ Reinstall/);
+    assert.match(h.shadow.querySelector('[data-message]').textContent,/Approve Update in Tampermonkey/);
+    assert.match(h.shadow.querySelector('[data-message]').textContent,/resetting settings, cancel/);
     assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
 });
 

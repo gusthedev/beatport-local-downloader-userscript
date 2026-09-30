@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.1
+// @version      2.0.2
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.1';
+    const CORE_VERSION = '2.0.2';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -894,7 +894,7 @@
         try {
             downloadWakeFile('beatportdl-wake-pair-' + browser + '-' + Date.now() + '.txt');
             pairingRequestedAt = Date.now();
-            queueMessage('Opening the private installer through Hazel. Approve Update / Reinstall in Tampermonkey, then reload Beatport. No code to copy.');
+            queueMessage('Opening the private installer through Hazel. Approve Update in Tampermonkey, then reload Beatport. If it says Reinstall or warns about resetting settings, cancel. No code to copy.');
         } catch {
             queueMessage('Could not request setup. Run Install Beatport Loader.command from your local BeatportDL folder.', true);
         }

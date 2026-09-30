@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.6.1
+// @version      1.6.2
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
