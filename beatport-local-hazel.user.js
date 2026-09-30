@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.0
+// @version      2.0.1
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.0';
+    const CORE_VERSION = '2.0.1';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -868,10 +868,44 @@
     const HELPER_URL = 'http://127.0.0.1:17854';
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
+    let pairingRequestedAt = 0;
+
+    function pairingStatus(state) {
+        if (!queuePanel) return;
+        const labels = { connected:'Connected to local helper', saved:'Pairing saved · helper asleep or unavailable',
+            missing:'This browser needs one-time setup', rejected:'Pairing needs repair · pair this browser again' };
+        queuePanel.querySelector('[data-pairing-status]').textContent = labels[state];
+        queuePanel.querySelector('[data-auto-pair]').hidden = state === 'connected' || state === 'saved';
+    }
+
+    function downloadWakeFile(name) {
+        const link = document.createElement('a');
+        const objectURL = URL.createObjectURL(new Blob(['Wake Beatport Queue\n'], { type:'text/plain' }));
+        link.href = objectURL; link.download = name; link.style.display = 'none';
+        document.documentElement.appendChild(link); link.click(); link.remove();
+        scheduleObjectUrlCleanup(objectURL);
+    }
+
+    function requestBrowserPairing() {
+        if (Date.now() - pairingRequestedAt < 10000) return;
+        const agent = navigator.userAgent || '';
+        const browser = /Chrome\//.test(agent) && !/Edg|OPR/.test(agent) ? 'chrome'
+            : /Version\/.*Safari\//.test(agent) ? 'safari' : 'default';
+        try {
+            downloadWakeFile('beatportdl-wake-pair-' + browser + '-' + Date.now() + '.txt');
+            pairingRequestedAt = Date.now();
+            queueMessage('Opening the private installer through Hazel. Approve Update / Reinstall in Tampermonkey, then reload Beatport. No code to copy.');
+        } catch {
+            queueMessage('Could not request setup. Run Install Beatport Loader.command from your local BeatportDL folder.', true);
+        }
+    }
 
     function helperRequest(path, data) {
         const token = loaderConfig.getHelperToken?.() || '';
-        if (!token) return Promise.reject(new Error('Pair the local helper in this panel first.'));
+        if (!token) {
+            pairingStatus('missing');
+            return Promise.reject(new Error('Click Pair this browser for automatic setup.'));
+        }
         return new Promise((resolve, reject) => GM_xmlhttpRequest({
             method: data === undefined ? 'GET' : 'POST', url: HELPER_URL + path,
             headers: { Authorization: 'Bearer ' + token, ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -879,29 +913,26 @@
             onload(response) {
                 try {
                     const value = JSON.parse(response.responseText);
+                    if (response.status === 403) pairingStatus('rejected');
                     if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
+                    pairingStatus('connected');
                     resolve(value);
                 } catch (error) { reject(error); }
             },
-            onerror() { reject(new Error('Helper asleep or unavailable. Use Start helper, then retry.')); },
-            ontimeout() { reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
+            onerror() { pairingStatus('saved'); reject(new Error('Helper asleep or unavailable. Use Start / reconnect.')); },
+            ontimeout() { pairingStatus('saved'); reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
         }));
     }
 
     function wakeQueue() {
         if (queueWaking) return queueWaking;
         queueWaking = (async () => {
-            if (!loaderConfig.getHelperToken?.()) throw new Error('Pair the local helper in this panel first.');
+            if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); throw new Error('Click Pair this browser for automatic setup.'); }
             try { await helperRequest('/health'); return; } catch (error) {
                 if (/pairing|refused/i.test(error.message)) throw error;
             }
             // One transient wake file when asleep, never a per-track job file.
-            const link = document.createElement('a');
-            const objectURL = URL.createObjectURL(new Blob(['Wake Beatport Queue\n'], { type:'text/plain' }));
-            link.href = objectURL; link.download = 'beatportdl-wake-' + Date.now() + '.txt';
-            link.style.display = 'none';
-            document.documentElement.appendChild(link); link.click(); link.remove();
-            scheduleObjectUrlCleanup(objectURL);
+            downloadWakeFile('beatportdl-wake-' + Date.now() + '.txt');
             queueMessage('Starting local helper through Hazel…');
             for (let attempt = 0; attempt < 15; attempt++) {
                 await new Promise(resolve => window.setTimeout(resolve, 1000));
@@ -936,16 +967,25 @@
     function renderQueue(snapshot) {
         queueLastSnapshot = snapshot;
         const jobs = snapshot.jobs || [];
-        const active = jobs.filter(job => ['queued', 'downloading', 'processing'].includes(job.state)).length;
-        const errors = jobs.filter(job => job.state === 'failed').length;
-        queuePanel.querySelector('[data-toggle]').textContent = 'Downloads' + (active ? ' · ' + active : errors ? ' !' : '');
+        const current = jobs.filter(job => ['queued', 'downloading', 'processing', 'waiting_venus'].includes(job.state));
+        const history = jobs.filter(job => ['completed', 'failed', 'cancelled'].includes(job.state));
+        const active = snapshot.current_count ?? current.length;
+        // Historical failures belong in history, not a permanent new-error badge.
+        queuePanel.querySelector('[data-toggle]').textContent = 'Downloads' + (active ? ' · ' + active : '');
         queuePanel.querySelector('[data-venus]').textContent = snapshot.venus ? 'Venus connected' : 'Venus offline · connection requires home Wi-Fi';
         queuePanel.querySelector('[data-pause]').textContent = snapshot.paused ? 'Resume queue' : 'Pause after current job';
         queuePanel.querySelector('[data-message]').textContent = snapshot.paused ? 'Queue saved and paused.'
             : snapshot.note || (snapshot.active ? 'Working · safe to close this page.' : 'No active work · helper will exit automatically.');
+        queuePanel.querySelector('[data-message]').style.color = '';
         const list = queuePanel.querySelector('[data-jobs]');
+        const historyList = queuePanel.querySelector('[data-history-jobs]');
         list.replaceChildren();
-        for (const job of jobs) {
+        historyList.replaceChildren();
+        const count = snapshot.history_count ?? history.length;
+        queuePanel.querySelector('[data-history-title]').textContent = 'History' + (count ? ` · latest ${Math.min(10, history.length)} of ${count}` : ' · empty');
+        queuePanel.querySelector('[data-clear-history]').hidden = !count;
+        queuePanel.querySelector('[data-restore-history]').hidden = !snapshot.history_cleared;
+        for (const job of [...current, ...history.slice(0, 10)]) {
             const row = document.createElement('article');
             const title = document.createElement('strong'); title.textContent = job.title;
             const mode = document.createElement('small');
@@ -955,14 +995,22 @@
             const detail = document.createElement('small');
             detail.textContent = job.error || job.detail || (job.files ? `${job.complete}/${job.files} files delivered` : '');
             row.append(title, mode, state, detail);
+            const isHistory = ['completed','failed','cancelled'].includes(job.state);
+            if (isHistory && job.updated) {
+                const date = document.createElement('small'); date.textContent = new Date(job.updated * 1000).toLocaleString(); row.append(date);
+            }
             if (job.state === 'failed') {
                 const retry = document.createElement('button'); retry.textContent = 'Retry this job';
                 retry.addEventListener('click', () => panelAction('/retry', { id: job.id }));
                 row.append(retry);
             }
-            list.append(row);
+            (isHistory ? historyList : list).append(row);
         }
-        if (!jobs.length) list.textContent = 'Your download queue will appear here.';
+        if (!current.length) list.textContent = 'No current downloads.';
+        else if (active > current.length) {
+            const more = document.createElement('small'); more.textContent = `Showing ${current.length} of ${active} current jobs.`; list.append(more);
+        }
+        if (!history.length) historyList.textContent = 'No visible history.';
     }
 
     async function pollQueue() {
@@ -1019,14 +1067,30 @@
             <header><strong>Beatport downloads</strong><button type="button" data-side aria-label="Move panel to other side">⇄</button><button type="button" data-close>Collapse</button></header>
             <label>New downloads<select data-mode><option value="library">Venus library</option><option value="local">Local only</option></select></label>
             <small data-venus>Venus availability checked by the helper</small>
+            <small data-pairing-status></small>
+            <button type="button" data-auto-pair>Pair this browser</button>
             <div data-message role="status" aria-live="polite">Start the helper to see your saved queue.</div>
             <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect>Connect Venus</button></div>
             <div data-jobs></div>
+            <details data-history><summary data-history-title>History</summary>
+              <div class="actions"><button type="button" data-clear-history hidden>Clear history</button><button type="button" data-restore-history hidden>Undo clear</button></div>
+              <small>Only the 10 latest entries are shown. Clearing hides finished and failed jobs; files and the retry log stay untouched.</small>
+              <div data-history-jobs></div>
+            </details>
             <small>Apple Music importing is handled remotely by the Mac mini.</small>
             <details><summary>Add a list of links</summary><label>One Beatport URL per line<textarea data-links rows="4"></textarea></label><button type="button" data-add>Queue list</button></details>
-            <details data-pair><summary>Helper pairing</summary><label>Private pairing code<input data-token type="password" autocomplete="off" spellcheck="false"></label><button type="button" data-save>Save pairing</button></details>
+            <details data-pair><summary>Advanced connection settings</summary><button type="button" data-repair-pair>Pair this browser again</button>
+              <small>Automatic setup opens your private local installer. Manual code entry is only a fallback.</small>
+              <label>Private pairing code<input data-token type="password" autocomplete="off" spellcheck="false"></label><button type="button" data-save>Save pairing</button></details>
           </section>`;
         const find = selector => queuePanel.querySelector(selector);
+        pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
+        find('[data-auto-pair]').addEventListener('click', requestBrowserPairing);
+        find('[data-repair-pair]').addEventListener('click', requestBrowserPairing);
+        find('[data-clear-history]').addEventListener('click', () => {
+            if (window.confirm('Clear displayed history? Downloaded files, saved jobs and the retry log will be kept. You can undo this.')) panelAction('/history/clear');
+        });
+        find('[data-restore-history]').addEventListener('click', () => panelAction('/history/restore'));
         find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library';
         find('[data-mode]').addEventListener('change', event => loaderConfig.setLocalOnly(event.target.value === 'local'));
         loaderConfig.onModeChange?.(() => { find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library'; });
@@ -1037,13 +1101,14 @@
             queueHost.style.right = left ? 'auto' : '8px'; queueHost.style.left = left ? '8px' : 'auto';
         });
         find('[data-wake]').addEventListener('click', () => {
-            if (!loaderConfig.getHelperToken?.()) { find('[data-pair]').open = true; queueMessage('Install the paired loader or enter your private pairing code.', true); return; }
+            if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); queueMessage('Click Pair this browser for automatic setup.', true); return; }
             wakeQueue().then(pollQueue).catch(error => queueMessage(error.message, true));
         });
         find('[data-save]').addEventListener('click', () => {
             const token = find('[data-token]').value.trim();
             if (!/^[a-f0-9]{64}$/.test(token)) return queueMessage('Enter the 64-character private pairing code.', true);
             loaderConfig.setHelperToken(token); find('[data-token]').value = ''; find('[data-pair]').open = false;
+            pairingStatus('saved');
             queueMessage('Paired. Click Start / reconnect.');
         });
         find('[data-pause]').addEventListener('click', () => panelAction(queueLastSnapshot?.paused ? '/resume' : '/pause'));

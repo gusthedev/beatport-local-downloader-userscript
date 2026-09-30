@@ -13,6 +13,8 @@ function setup(t) {
     const attach = w.Element.prototype.attachShadow;
     w.Element.prototype.attachShadow = function(options) { shadow = attach.call(this, options); return shadow; };
     w.Range.prototype.getClientRects = () => [];
+    w.URL.createObjectURL = () => 'blob:fixture';
+    w.URL.revokeObjectURL = () => {};
     w.HTMLAnchorElement.prototype.click = function() { downloads.push({href:this.href,download:this.download}); };
     w.BEATPORTDL_CONFIG = {helperEnabled:true,getHelperToken:()=> 'a'.repeat(64),setHelperToken(){},
         get localOnly(){return local;},setLocalOnly(value){local=value;modeChange?.();},onModeChange(fn){modeChange=fn;}};
@@ -73,4 +75,60 @@ test('an awake helper never needs a wake file even after reconnecting', async t 
     h.shadow.querySelector('[data-wake]').click();await h.settle();
     h.shadow.querySelector('[data-wake]').click();await h.settle();
     assert.equal(h.downloads.length,0);
+});
+
+test('historical failures stay collapsed, capped at ten, and do not set an error badge', async t => {
+    const h=setup(t);
+    h.setSnapshot({history_count:1000,jobs:Array.from({length:30},(_,i)=>({id:String(i),title:'Old track '+i,state:'failed',mode:'local',label:'Needs attention',updated:1,error:'Old failure'}))});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-history]').open,false);
+    assert.equal(h.shadow.querySelector('[data-history-jobs]').children.length,10);
+    assert.match(h.shadow.querySelector('[data-history-title]').textContent,/latest 10 of 1000/);
+    assert.equal(h.shadow.querySelector('[data-toggle]').textContent,'Downloads');
+    assert.equal(h.shadow.querySelector('[data-jobs]').textContent,'No current downloads.');
+});
+
+test('current jobs remain separate and clear history supports cancel and undo', async t => {
+    const h=setup(t);h.setSnapshot({jobs:[{id:'a',title:'Current',state:'processing',mode:'library',label:'Converting'},
+        {id:'b',title:'Old',state:'completed',mode:'local',label:'Saved locally'}]});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-jobs]').children.length,1);
+    assert.equal(h.shadow.querySelector('[data-toggle]').textContent,'Downloads · 1');
+    h.w.confirm=()=>false;h.shadow.querySelector('[data-clear-history]').click();await h.settle();
+    assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
+    h.w.confirm=()=>true;h.shadow.querySelector('[data-clear-history]').click();await h.settle();
+    assert(h.requests.some(r=>r.url.endsWith('/history/clear')));
+    h.setSnapshot({history_cleared:true,jobs:[]});h.shadow.querySelector('[data-restore-history]').click();await h.settle();
+    assert(h.requests.some(r=>r.url.endsWith('/history/restore')));
+    assert.equal(h.shadow.querySelector('[data-restore-history]').hidden,false);
+});
+
+test('paired browser has clear connection status and no prominent setup prompt', async t => {
+    const h=setup(t);await h.settle();
+    assert.equal(h.shadow.querySelector('[data-pairing-status]').textContent,'Connected to local helper');
+    assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden,true);
+    assert.equal(h.shadow.querySelector('[data-pair]').open,false);
+});
+
+test('automatic pairing needs no key and targets the requesting browser with one wake file', async t => {
+    const h=setup(t);await h.settle();h.w.BEATPORTDL_CONFIG.getHelperToken=()=>'';
+    Object.defineProperty(h.w.navigator,'userAgent',{value:'Mozilla/5.0 Chrome/150.0 Safari/537.36'});
+    h.shadow.querySelector('[data-wake]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden,false);
+    h.shadow.querySelector('[data-auto-pair]').click();h.shadow.querySelector('[data-auto-pair]').click();
+    assert.equal(h.downloads.length,1);
+    assert.match(h.downloads[0].download,/^beatportdl-wake-pair-chrome-\d+\.txt$/);
+    assert.match(h.shadow.querySelector('[data-message]').textContent,/Approve Update \/ Reinstall/);
+    assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
+});
+
+test('Safari pairing uses Safari and a rejected key shows a repair action', async t => {
+    const h=setup(t);await h.settle();
+    Object.defineProperty(h.w.navigator,'userAgent',{value:'Mozilla/5.0 Version/27.0 Safari/605.1.15'});
+    h.w.GM_xmlhttpRequest=request=>request.onload({status:403,responseText:'{"error":"Helper pairing required."}'});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden,false);
+    assert.match(h.shadow.querySelector('[data-pairing-status]').textContent,/needs repair/);
+    h.shadow.querySelector('[data-auto-pair]').click();
+    assert.match(h.downloads[0].download,/^beatportdl-wake-pair-safari-/);
 });

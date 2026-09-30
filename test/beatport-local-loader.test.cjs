@@ -36,7 +36,7 @@ ${body}
 globalThis[Symbol.for('tm.beatportdl.local.instance')] = { version: '${version}' };`;
 }
 
-function runLoader({ storageValues = {}, response = null, requestFailure = '' } = {}) {
+function runLoader({ storageValues = {}, response = null, requestFailure = '', seed = '' } = {}) {
     const storage = new Map(Object.entries(storageValues));
     const requests = [];
     const menus = new Map();
@@ -68,13 +68,22 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '' } 
         },
     };
     context.globalThis = context;
-    vm.runInNewContext(loaderSource, context, { filename: 'beatport-local-loader.user.js' });
+    vm.runInNewContext(seed ? loaderSource.replace("const INITIAL_HELPER_TOKEN = '';", `const INITIAL_HELPER_TOKEN = '${seed}';`) : loaderSource,
+        context, { filename: 'beatport-local-loader.user.js' });
     return { alerts, context, menus, requests, storage };
 }
 
 test('loader metadata permits the GitHub Contents API', () => {
     assert.match(loaderSource, /^\/\/\s*@connect\s+api\.github\.com\s*$/m);
     assert.doesNotMatch(loaderSource, /^\/\/\s*@connect\s+raw\.githubusercontent\.com\s*$/m);
+});
+
+test('private installer seeds or repairs pairing while public updates preserve it', () => {
+    const key='beatportLoader.helperToken.v1', token='a'.repeat(64);
+    assert.equal(runLoader({seed:token}).storage.get(key),token);
+    assert.equal(runLoader({seed:token,storageValues:{[key]:'old-key'}}).storage.get(key),token);
+    assert.equal(runLoader({storageValues:{[key]:token}}).storage.get(key),token);
+    assert.equal(runLoader().storage.has(key),false);
 });
 
 test('cold first install fetches current-branch raw source, caches, and starts the core once', () => {

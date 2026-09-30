@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.6.0
+// @version      1.6.1
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -32,7 +32,7 @@
     const HELPER_TOKEN_KEY = 'beatportLoader.helperToken.v1';
     // A locally paired installer may seed this value once. Public copies never contain a token.
     const INITIAL_HELPER_TOKEN = '';
-    if (INITIAL_HELPER_TOKEN && !GM_getValue(HELPER_TOKEN_KEY, '')) GM_setValue(HELPER_TOKEN_KEY, INITIAL_HELPER_TOKEN);
+    if (INITIAL_HELPER_TOKEN && GM_getValue(HELPER_TOKEN_KEY, '') !== INITIAL_HELPER_TOKEN) GM_setValue(HELPER_TOKEN_KEY, INITIAL_HELPER_TOKEN);
     const modeListeners = new Set();
     function announceMode() { modeListeners.forEach(callback => callback()); }
     if (typeof GM_addValueChangeListener === 'function') {
