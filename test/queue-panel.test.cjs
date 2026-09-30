@@ -133,3 +133,14 @@ test('Safari pairing uses Safari and a rejected key shows a repair action', asyn
     h.shadow.querySelector('[data-auto-pair]').click();
     assert.match(h.downloads[0].download,/^beatportdl-wake-pair-safari-/);
 });
+
+test('a browser-origin rejection is not mislabeled as broken pairing', async t => {
+    const h=setup(t);await h.settle();
+    h.w.GM_xmlhttpRequest=request=>request.onload(request.method==='POST'
+        ? {status:403,responseText:JSON.stringify({code:'origin_rejected',error:'Browser request origin rejected; the pairing key is valid.'})}
+        : {status:200,responseText:'{"ok":true}'});
+    h.shadow.querySelector('[data-connect]').click();await h.settle();
+    assert.match(h.shadow.querySelector('[data-message]').textContent,/pairing key is valid/);
+    assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden,true);
+    assert.doesNotMatch(h.shadow.querySelector('[data-pairing-status]').textContent,/needs repair/);
+});

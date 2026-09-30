@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.2
+// @version      2.0.3
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.2';
+    const CORE_VERSION = '2.0.3';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -913,7 +913,7 @@
             onload(response) {
                 try {
                     const value = JSON.parse(response.responseText);
-                    if (response.status === 403) pairingStatus('rejected');
+                    if (response.status === 403 && (!value.code || value.code === 'pairing_required')) pairingStatus('rejected');
                     if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
                     pairingStatus('connected');
                     resolve(value);

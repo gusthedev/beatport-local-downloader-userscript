@@ -12,6 +12,8 @@ The helper is installed separately; this public loader contains no pairing secre
 
 Requests use Tampermonkey's localhost grant and authenticated loopback requests. Status reads never launch or keep the helper alive. No always-running service is required; the local helper exits after its idle grace period. Browser downloads must save to the Hazel-watched Downloads folder for waking and automatic pairing to work.
 
+The private helper accepts Safari's UUID-shaped `safari-web-extension://` request origin only with the correct private bearer key and exact loopback Host. Ordinary foreign website origins remain blocked. Address/origin rejections are reported separately from an invalid pairing key.
+
 The existing TXT batch/retry workflow remains supported by the local queue. Browser jobs no longer produce one TXT per track. An offline helper is not treated as a failed download; accepted work remains saved locally.
 
 ## Features
@@ -34,7 +36,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.2** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.2** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.3** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -49,7 +51,7 @@ If you have an older loader, update it to **1.6.2** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.2**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.3**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 ### Safari 27 playback
 
