@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local Download Loader
 // @namespace    local.beatportdl.hazel.loader
-// @version      1.5.2
+// @version      1.6.0
 // @description  Loads the shared Beatport userscript maintained on GitHub.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -18,6 +18,7 @@
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @connect      api.github.com
+// @connect      127.0.0.1
 // @updateURL    https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @downloadURL  https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js
 // @noframes
@@ -28,12 +29,19 @@
 
     const CONFIRM_LARGE_JOBS_KEY = 'beatportLoader.confirmLargeJobs.v1';
     const LOCAL_ONLY_KEY = 'beatportLoader.localOnly.v1';
+    const HELPER_TOKEN_KEY = 'beatportLoader.helperToken.v1';
+    // A locally paired installer may seed this value once. Public copies never contain a token.
+    const INITIAL_HELPER_TOKEN = '';
+    if (INITIAL_HELPER_TOKEN && !GM_getValue(HELPER_TOKEN_KEY, '')) GM_setValue(HELPER_TOKEN_KEY, INITIAL_HELPER_TOKEN);
     const modeListeners = new Set();
     function announceMode() { modeListeners.forEach(callback => callback()); }
     if (typeof GM_addValueChangeListener === 'function') {
         GM_addValueChangeListener(LOCAL_ONLY_KEY, announceMode);
     }
     globalThis.BEATPORTDL_CONFIG = Object.freeze({
+        helperEnabled: true,
+        getHelperToken() { return GM_getValue(HELPER_TOKEN_KEY, ''); },
+        setHelperToken(value) { GM_setValue(HELPER_TOKEN_KEY, value); },
         get confirmLargeJobs() {
             return GM_getValue(CONFIRM_LARGE_JOBS_KEY, true) !== false;
         },
@@ -303,6 +311,9 @@
         notify(next
             ? 'Local-only downloads are enabled. New jobs will be converted and left in the local-only Downloads folder.'
             : 'Local-only downloads are disabled. New jobs will use the normal library workflow.');
+    });
+    GM_registerMenuCommand('Show Beatport download queue', () => {
+        globalThis[INSTANCE_KEY]?.showQueue?.();
     });
 
     startCachedCore();

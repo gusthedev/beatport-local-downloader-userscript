@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.9.2
+// @version      2.0.0
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '1.9.2';
+    const CORE_VERSION = '2.0.0';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -286,6 +286,7 @@
     }
 
     function reconcileModeControl() {
+        if (loaderConfig.helperEnabled) return;
         let button = document.getElementById(MODE_ID);
         if (typeof loaderConfig.setLocalOnly !== 'function') return;
         if (!button) {
@@ -448,6 +449,24 @@
 
     function createHazelJob(media, icon) {
         if (!media?.url || !icon || icon.disabled || !claimJob(media)) return false;
+        if (loaderConfig.helperEnabled) {
+            icon.disabled = true;
+            const mode = loaderConfig.localOnly ? 'local' : 'library';
+            ensureQueuePanel();
+            queueMessage('Sending request…');
+            const ready = !queueLastSnapshot && loaderConfig.getHelperToken?.() ? wakeQueue() : Promise.resolve();
+            ready.then(() => queueAPI('/jobs', { urls: [media.url], mode })).then(() => {
+                recordSubmission(media);
+                setFeedback(icon, true);
+                queueMessage('Queued');
+                pollQueue();
+            }).catch(error => {
+                instance.recentJobs.delete(mediaKey(media));
+                setFeedback(icon, false);
+                queueMessage(error.message, true);
+            });
+            return true;
+        }
 
         let download = null;
         let objectUrl = '';
@@ -846,12 +865,215 @@
         document.documentElement.appendChild(style);
     }
 
+    const HELPER_URL = 'http://127.0.0.1:17854';
+    let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
+    let queueLastSnapshot = null;
+
+    function helperRequest(path, data) {
+        const token = loaderConfig.getHelperToken?.() || '';
+        if (!token) return Promise.reject(new Error('Pair the local helper in this panel first.'));
+        return new Promise((resolve, reject) => GM_xmlhttpRequest({
+            method: data === undefined ? 'GET' : 'POST', url: HELPER_URL + path,
+            headers: { Authorization: 'Bearer ' + token, ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) },
+            ...(data === undefined ? {} : { data: JSON.stringify(data) }), timeout: 6000,
+            onload(response) {
+                try {
+                    const value = JSON.parse(response.responseText);
+                    if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
+                    resolve(value);
+                } catch (error) { reject(error); }
+            },
+            onerror() { reject(new Error('Helper asleep or unavailable. Use Start helper, then retry.')); },
+            ontimeout() { reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
+        }));
+    }
+
+    function wakeQueue() {
+        if (queueWaking) return queueWaking;
+        queueWaking = (async () => {
+            if (!loaderConfig.getHelperToken?.()) throw new Error('Pair the local helper in this panel first.');
+            try { await helperRequest('/health'); return; } catch (error) {
+                if (/pairing|refused/i.test(error.message)) throw error;
+            }
+            // One transient wake file when asleep, never a per-track job file.
+            const link = document.createElement('a');
+            const objectURL = URL.createObjectURL(new Blob(['Wake Beatport Queue\n'], { type:'text/plain' }));
+            link.href = objectURL; link.download = 'beatportdl-wake-' + Date.now() + '.txt';
+            link.style.display = 'none';
+            document.documentElement.appendChild(link); link.click(); link.remove();
+            scheduleObjectUrlCleanup(objectURL);
+            queueMessage('Starting local helper through Hazel…');
+            for (let attempt = 0; attempt < 15; attempt++) {
+                await new Promise(resolve => window.setTimeout(resolve, 1000));
+                try { await helperRequest('/health'); return; } catch {}
+            }
+            throw new Error('Hazel did not start the helper. Check its Beatport rule and Downloads folder.');
+        })().finally(() => { queueWaking = null; });
+        return queueWaking;
+    }
+
+    async function queueAPI(path, data) {
+        // Never silently fall back to a TXT job: a response may have been lost
+        // after acceptance. Database dedup makes an explicit retry safe.
+        await wakeQueue();
+        return helperRequest(path, data);
+    }
+
+    function queueMessage(message, error = false) {
+        if (!queuePanel) return;
+        queuePanel.querySelector('[data-message]').textContent = message;
+        queuePanel.querySelector('[data-toggle]').textContent = error ? 'Downloads !' : message === 'Queued' ? 'Downloads · queued' : 'Downloads';
+        queuePanel.querySelector('[data-message]').style.color = error ? '#ffb5a8' : '';
+    }
+
+    function setQueueOpen(open) {
+        if (!queuePanel) return;
+        queuePanel.querySelector('[data-panel]').hidden = !open;
+        queuePanel.querySelector('[data-toggle]').setAttribute('aria-expanded', String(open));
+        if (open) pollQueue();
+    }
+
+    function renderQueue(snapshot) {
+        queueLastSnapshot = snapshot;
+        const jobs = snapshot.jobs || [];
+        const active = jobs.filter(job => ['queued', 'downloading', 'processing'].includes(job.state)).length;
+        const errors = jobs.filter(job => job.state === 'failed').length;
+        queuePanel.querySelector('[data-toggle]').textContent = 'Downloads' + (active ? ' · ' + active : errors ? ' !' : '');
+        queuePanel.querySelector('[data-venus]').textContent = snapshot.venus ? 'Venus connected' : 'Venus offline · connection requires home Wi-Fi';
+        queuePanel.querySelector('[data-pause]').textContent = snapshot.paused ? 'Resume queue' : 'Pause after current job';
+        queuePanel.querySelector('[data-message]').textContent = snapshot.paused ? 'Queue saved and paused.'
+            : snapshot.note || (snapshot.active ? 'Working · safe to close this page.' : 'No active work · helper will exit automatically.');
+        const list = queuePanel.querySelector('[data-jobs]');
+        list.replaceChildren();
+        for (const job of jobs) {
+            const row = document.createElement('article');
+            const title = document.createElement('strong'); title.textContent = job.title;
+            const mode = document.createElement('small');
+            mode.textContent = job.local_exception ? 'Local exception · no Venus or Music import'
+                : job.mode === 'local' ? 'Local only' : 'Venus library';
+            const state = document.createElement('div'); state.textContent = job.label;
+            const detail = document.createElement('small');
+            detail.textContent = job.error || job.detail || (job.files ? `${job.complete}/${job.files} files delivered` : '');
+            row.append(title, mode, state, detail);
+            if (job.state === 'failed') {
+                const retry = document.createElement('button'); retry.textContent = 'Retry this job';
+                retry.addEventListener('click', () => panelAction('/retry', { id: job.id }));
+                row.append(retry);
+            }
+            list.append(row);
+        }
+        if (!jobs.length) list.textContent = 'Your download queue will appear here.';
+    }
+
+    async function pollQueue() {
+        window.clearTimeout(queuePollTimer);
+        if (queuePolling || !queuePanel || document.hidden) return;
+        queuePolling = true;
+        let again = false;
+        try {
+            const snapshot = await helperRequest('/jobs');
+            renderQueue(snapshot);
+            again = snapshot.active || snapshot.jobs.some(job => ['queued','downloading','processing'].includes(job.state)) && !snapshot.paused;
+        } catch (error) {
+            queueLastSnapshot = null;
+            queueMessage(error.message);
+        } finally {
+            queuePolling = false;
+            if (again) queuePollTimer = window.setTimeout(pollQueue, 1500);
+        }
+    }
+
+    async function panelAction(path, data = {}) {
+        try { await queueAPI(path, data); await pollQueue(); }
+        catch (error) { queueMessage(error.message, true); }
+    }
+
+    function ensureQueuePanel() {
+        if (queuePanel) return;
+        queueHost = document.createElement('div');
+        queueHost.id = 'tm-beatportdl-queue';
+        queueHost.setAttribute(OWNED_ATTRIBUTE, 'queue');
+        // Only the compact tab/panel intercepts clicks; there is no backdrop.
+        queueHost.style.cssText = 'position:fixed;top:88px;right:8px;z-index:2147483645;pointer-events:none;';
+        queuePanel = queueHost.attachShadow({ mode: 'closed' });
+        queuePanel.innerHTML = `
+          <style>
+            :host { all:initial; }
+            * { box-sizing:border-box; } [hidden] { display:none!important; }
+            button,input,textarea,select { font:inherit; }
+            button,select { color:#f0f7f3;background:#26352e;border:1px solid #526258;border-radius:6px;padding:7px 9px;cursor:pointer; }
+            button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid #01ff95;outline-offset:2px; }
+            [data-toggle] { pointer-events:auto;display:block;margin-left:auto;font:12px system-ui;padding:7px 9px; }
+            section { pointer-events:auto;width:min(350px,calc(100vw - 24px));max-height:max(90px,calc(100dvh - 250px));overflow:auto;
+              padding:14px;margin-top:6px;border:1px solid #41534a;border-radius:10px;background:#142019;color:#eff7f2;font:13px/1.4 system-ui;box-shadow:0 6px 20px #0005; }
+            header,.actions { display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px; }
+            header strong { flex:1; } label,small { display:block; } small { color:#b9cbbf;overflow-wrap:anywhere; }
+            select,input,textarea { max-width:100%;width:100%;margin:5px 0 9px; }
+            input,textarea { background:#0e1712;color:#f0f7f3;border:1px solid #526258;border-radius:4px;padding:7px; }
+            article { border-top:1px solid #36493d;padding:10px 0;overflow-wrap:anywhere; } article strong { font-weight:600; }
+            [data-message] { margin:8px 0; } details { margin-top:10px; } summary { cursor:pointer; }
+            @media(pointer:coarse) { button,select { min-height:44px; } }
+          </style>
+          <button type="button" data-toggle aria-expanded="false">Downloads</button>
+          <section data-panel hidden aria-label="Beatport download queue">
+            <header><strong>Beatport downloads</strong><button type="button" data-side aria-label="Move panel to other side">⇄</button><button type="button" data-close>Collapse</button></header>
+            <label>New downloads<select data-mode><option value="library">Venus library</option><option value="local">Local only</option></select></label>
+            <small data-venus>Venus availability checked by the helper</small>
+            <div data-message role="status" aria-live="polite">Start the helper to see your saved queue.</div>
+            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect>Connect Venus</button></div>
+            <div data-jobs></div>
+            <small>Apple Music importing is handled remotely by the Mac mini.</small>
+            <details><summary>Add a list of links</summary><label>One Beatport URL per line<textarea data-links rows="4"></textarea></label><button type="button" data-add>Queue list</button></details>
+            <details data-pair><summary>Helper pairing</summary><label>Private pairing code<input data-token type="password" autocomplete="off" spellcheck="false"></label><button type="button" data-save>Save pairing</button></details>
+          </section>`;
+        const find = selector => queuePanel.querySelector(selector);
+        find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library';
+        find('[data-mode]').addEventListener('change', event => loaderConfig.setLocalOnly(event.target.value === 'local'));
+        loaderConfig.onModeChange?.(() => { find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library'; });
+        find('[data-toggle]').addEventListener('click', () => setQueueOpen(find('[data-panel]').hidden));
+        find('[data-close]').addEventListener('click', () => setQueueOpen(false));
+        find('[data-side]').addEventListener('click', () => {
+            const left = queueHost.style.right !== 'auto';
+            queueHost.style.right = left ? 'auto' : '8px'; queueHost.style.left = left ? '8px' : 'auto';
+        });
+        find('[data-wake]').addEventListener('click', () => {
+            if (!loaderConfig.getHelperToken?.()) { find('[data-pair]').open = true; queueMessage('Install the paired loader or enter your private pairing code.', true); return; }
+            wakeQueue().then(pollQueue).catch(error => queueMessage(error.message, true));
+        });
+        find('[data-save]').addEventListener('click', () => {
+            const token = find('[data-token]').value.trim();
+            if (!/^[a-f0-9]{64}$/.test(token)) return queueMessage('Enter the 64-character private pairing code.', true);
+            loaderConfig.setHelperToken(token); find('[data-token]').value = ''; find('[data-pair]').open = false;
+            queueMessage('Paired. Click Start / reconnect.');
+        });
+        find('[data-pause]').addEventListener('click', () => panelAction(queueLastSnapshot?.paused ? '/resume' : '/pause'));
+        find('[data-connect]').addEventListener('click', () => panelAction('/connect'));
+        find('[data-add]').addEventListener('click', () => {
+            const urls = find('[data-links]').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+            if (!urls.length) return queueMessage('Paste at least one Beatport link.', true);
+            queueAPI('/jobs', { urls, mode: loaderConfig.localOnly ? 'local' : 'library' }).then(() => {
+                find('[data-links]').value = ''; queueMessage('List queued'); pollQueue();
+            }).catch(error => queueMessage(error.message, true));
+        });
+        // Typing in our controls must not trigger Beatport's keyboard player shortcuts.
+        queuePanel.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); event.stopPropagation(); });
+        window.addEventListener('pointerdown', event => { if (!event.composedPath().includes(queueHost)) setQueueOpen(false); }, { passive:true });
+        window.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); });
+        document.addEventListener('visibilitychange', () => { if (!document.hidden && !find('[data-panel]').hidden) pollQueue(); });
+        document.documentElement.appendChild(queueHost);
+        instance.showQueue = () => setQueueOpen(true);
+        // Discover an already-awake helper without launching anything. This
+        // avoids app prompts just because a new Beatport page was opened.
+        if (loaderConfig.getHelperToken?.()) helperRequest('/jobs').then(renderQueue).catch(() => {});
+    }
+
     function start() {
         if (instance.started) return;
         instance.started = true;
         addIconStyles();
         pruneSubmissionStorage();
         reconcileModeControl();
+        if (loaderConfig.helperEnabled) ensureQueuePanel();
         loaderConfig.onModeChange?.(reconcileModeControl);
         window.addEventListener('focus', refreshSubmissionIcons);
         document.addEventListener('visibilitychange', () => {
@@ -873,6 +1095,7 @@
         installNavigationHooks();
         window.addEventListener('resize', scheduleTitlePosition, { passive: true });
         window.addEventListener('pagehide', cleanupObjectUrls, { passive: true });
+        window.addEventListener('pagehide', () => window.clearTimeout(queuePollTimer), { passive: true });
         document.fonts?.ready?.then(scheduleTitlePosition).catch?.(() => {});
         document.fonts?.addEventListener?.('loadingdone', scheduleTitlePosition);
     }
