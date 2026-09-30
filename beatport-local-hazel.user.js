@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.3
+// @version      2.0.4
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.3';
+    const CORE_VERSION = '2.0.4';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -972,10 +972,16 @@
         const active = snapshot.current_count ?? current.length;
         // Historical failures belong in history, not a permanent new-error badge.
         queuePanel.querySelector('[data-toggle]').textContent = 'Downloads' + (active ? ' · ' + active : '');
-        queuePanel.querySelector('[data-venus]').textContent = snapshot.venus ? 'Venus connected' : 'Venus offline · connection requires home Wi-Fi';
+        queuePanel.querySelector('[data-venus]').hidden = !!snapshot.venus;
+        const venusButton = queuePanel.querySelector('[data-connect]');
+        venusButton.textContent = snapshot.venus ? 'Venus Connected' : 'Venus Disconnected';
+        venusButton.disabled = !!snapshot.venus;
+        venusButton.style.color = snapshot.venus ? '#a6f3c8' : '';
+        venusButton.title = snapshot.venus ? 'Venus is already connected.' : 'Click to connect to Venus.';
         queuePanel.querySelector('[data-pause]').textContent = snapshot.paused ? 'Resume queue' : 'Pause after current job';
+        const note = snapshot.venus && snapshot.note === 'Venus connected' ? '' : snapshot.note;
         queuePanel.querySelector('[data-message]').textContent = snapshot.paused ? 'Queue saved and paused.'
-            : snapshot.note || (snapshot.active ? 'Working · safe to close this page.' : 'No active work · helper will exit automatically.');
+            : note || (snapshot.active ? 'Working · safe to close this page.' : 'No active work · helper will exit automatically.');
         queuePanel.querySelector('[data-message]').style.color = '';
         const list = queuePanel.querySelector('[data-jobs]');
         const historyList = queuePanel.querySelector('[data-history-jobs]');
@@ -984,7 +990,6 @@
         const count = snapshot.history_count ?? history.length;
         queuePanel.querySelector('[data-history-title]').textContent = 'History' + (count ? ` · latest ${Math.min(10, history.length)} of ${count}` : ' · empty');
         queuePanel.querySelector('[data-clear-history]').hidden = !count;
-        queuePanel.querySelector('[data-restore-history]').hidden = !snapshot.history_cleared;
         for (const job of [...current, ...history.slice(0, 10)]) {
             const row = document.createElement('article');
             const title = document.createElement('strong'); title.textContent = job.title;
@@ -1055,6 +1060,7 @@
             section { pointer-events:auto;width:min(350px,calc(100vw - 24px));max-height:max(90px,calc(100dvh - 250px));overflow:auto;
               padding:14px;margin-top:6px;border:1px solid #41534a;border-radius:10px;background:#142019;color:#eff7f2;font:13px/1.4 system-ui;box-shadow:0 6px 20px #0005; }
             header,.actions { display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px; }
+            [data-connect]:disabled { cursor:default; }
             header strong { flex:1; } label,small { display:block; } small { color:#b9cbbf;overflow-wrap:anywhere; }
             select,input,textarea { max-width:100%;width:100%;margin:5px 0 9px; }
             input,textarea { background:#0e1712;color:#f0f7f3;border:1px solid #526258;border-radius:4px;padding:7px; }
@@ -1066,18 +1072,17 @@
           <section data-panel hidden aria-label="Beatport download queue">
             <header><strong>Beatport downloads</strong><button type="button" data-side aria-label="Move panel to other side">⇄</button><button type="button" data-close>Collapse</button></header>
             <label>New downloads<select data-mode><option value="library">Venus library</option><option value="local">Local only</option></select></label>
-            <small data-venus>Venus availability checked by the helper</small>
+            <small data-venus hidden>Connecting requires home Wi-Fi.</small>
             <small data-pairing-status></small>
             <button type="button" data-auto-pair>Pair this browser</button>
             <div data-message role="status" aria-live="polite">Start the helper to see your saved queue.</div>
-            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect>Connect Venus</button></div>
+            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect disabled>Venus · not checked</button></div>
             <div data-jobs></div>
             <details data-history><summary data-history-title>History</summary>
-              <div class="actions"><button type="button" data-clear-history hidden>Clear history</button><button type="button" data-restore-history hidden>Undo clear</button></div>
+              <div class="actions"><button type="button" data-clear-history hidden>Clear history</button></div>
               <small>Only the 10 latest entries are shown. Clearing hides finished and failed jobs; files and the retry log stay untouched.</small>
               <div data-history-jobs></div>
             </details>
-            <small>Apple Music importing is handled remotely by the Mac mini.</small>
             <details><summary>Add a list of links</summary><label>One Beatport URL per line<textarea data-links rows="4"></textarea></label><button type="button" data-add>Queue list</button></details>
             <details data-pair><summary>Advanced connection settings</summary><button type="button" data-repair-pair>Pair this browser again</button>
               <small>Automatic setup opens your private local installer. Manual code entry is only a fallback.</small>
@@ -1088,9 +1093,8 @@
         find('[data-auto-pair]').addEventListener('click', requestBrowserPairing);
         find('[data-repair-pair]').addEventListener('click', requestBrowserPairing);
         find('[data-clear-history]').addEventListener('click', () => {
-            if (window.confirm('Clear displayed history? Downloaded files, saved jobs and the retry log will be kept. You can undo this.')) panelAction('/history/clear');
+            if (window.confirm('Clear displayed history? Downloaded files, saved jobs and the retry log will be kept.')) panelAction('/history/clear');
         });
-        find('[data-restore-history]').addEventListener('click', () => panelAction('/history/restore'));
         find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library';
         find('[data-mode]').addEventListener('change', event => loaderConfig.setLocalOnly(event.target.value === 'local'));
         loaderConfig.onModeChange?.(() => { find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library'; });

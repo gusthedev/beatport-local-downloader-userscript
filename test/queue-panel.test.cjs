@@ -60,7 +60,7 @@ test('untrusted job titles are text and successful delivery does not claim Music
     const h=setup(t);h.setSnapshot({jobs:[{id:'a'.repeat(32),title:'<img src=x onerror=alert(1)>',state:'completed',mode:'library',label:'Delivered to Venus',files:1,complete:1}]});
     h.shadow.querySelector('[data-toggle]').click();await h.settle();
     assert.equal(h.shadow.querySelector('img'),null);assert.match(h.shadow.textContent,/Delivered to Venus/);
-    assert.match(h.shadow.textContent,/handled remotely by the Mac mini/);
+    assert.doesNotMatch(h.shadow.textContent,/Apple Music importing|handled remotely by the Mac mini/);
 });
 
 test('failed submission never silently falls back to Hazel text files', async t => {
@@ -88,7 +88,7 @@ test('historical failures stay collapsed, capped at ten, and do not set an error
     assert.equal(h.shadow.querySelector('[data-jobs]').textContent,'No current downloads.');
 });
 
-test('current jobs remain separate and clear history supports cancel and undo', async t => {
+test('current jobs remain separate and clear history preserves logs without an undo control', async t => {
     const h=setup(t);h.setSnapshot({jobs:[{id:'a',title:'Current',state:'processing',mode:'library',label:'Converting'},
         {id:'b',title:'Old',state:'completed',mode:'local',label:'Saved locally'}]});
     h.shadow.querySelector('[data-toggle]').click();await h.settle();
@@ -96,11 +96,27 @@ test('current jobs remain separate and clear history supports cancel and undo', 
     assert.equal(h.shadow.querySelector('[data-toggle]').textContent,'Downloads · 1');
     h.w.confirm=()=>false;h.shadow.querySelector('[data-clear-history]').click();await h.settle();
     assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
-    h.w.confirm=()=>true;h.shadow.querySelector('[data-clear-history]').click();await h.settle();
+    let prompt='';h.w.confirm=message=>{prompt=message;return true;};h.shadow.querySelector('[data-clear-history]').click();await h.settle();
     assert(h.requests.some(r=>r.url.endsWith('/history/clear')));
-    h.setSnapshot({history_cleared:true,jobs:[]});h.shadow.querySelector('[data-restore-history]').click();await h.settle();
-    assert(h.requests.some(r=>r.url.endsWith('/history/restore')));
-    assert.equal(h.shadow.querySelector('[data-restore-history]').hidden,false);
+    assert.match(prompt,/retry log will be kept/);assert.doesNotMatch(prompt,/undo/i);
+    assert.equal(h.shadow.querySelector('[data-restore-history]'),null);
+    assert.doesNotMatch(h.shadow.textContent,/Undo clear/);
+});
+
+test('Venus status button is disabled when connected and connects when disconnected', async t => {
+    const h=setup(t);
+    h.setSnapshot({venus:true,note:'Venus connected'});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-venus]').hidden,true);
+    const status=h.shadow.querySelector('[data-connect]');
+    assert.equal(status.hidden,false);assert.equal(status.disabled,true);
+    assert.equal(status.textContent,'Venus Connected');
+    assert.doesNotMatch(h.shadow.querySelector('[data-message]').textContent,/Venus connected/);
+    const requests=h.requests.length;status.click();await h.settle();assert.equal(h.requests.length,requests);
+    h.setSnapshot({venus:false,note:''});h.shadow.querySelector('[data-toggle]').click();h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(status.disabled,false);assert.equal(status.textContent,'Venus Disconnected');
+    assert.equal(h.shadow.querySelector('[data-venus]').hidden,false);
+    status.click();await h.settle();assert(h.requests.some(r=>r.method==='POST'&&r.url.endsWith('/connect')));
 });
 
 test('paired browser has clear connection status and no prominent setup prompt', async t => {
