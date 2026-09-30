@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.4
+// @version      2.0.5
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.4';
+    const CORE_VERSION = '2.0.5';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -87,7 +87,11 @@
     const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const SUBMISSION_PREFIX = 'beatport.submitted.v1.';
-    const SUBMISSION_TTL = 24 * 60 * 60 * 1000;
+    const SUBMISSION_DAYS = 90;
+    const SUBMISSION_TTL = SUBMISSION_DAYS * 24 * 60 * 60 * 1000;
+    const SUBMISSION_CLEANUP_KEY = 'beatport.submissionCleanup.v1';
+    const SUBMISSION_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
+    let lastSubmissionCleanup = 0;
     const MODE_ID = 'tm-beatportdl-mode';
     const submissionMemory = new Map();
     const watchedSubmissions = new Map();
@@ -277,12 +281,19 @@
     }
 
     function pruneSubmissionStorage(now = Date.now()) {
-        if (typeof GM_listValues !== 'function' || typeof GM_deleteValue !== 'function') return;
+        if (typeof GM_listValues !== 'function' || typeof GM_deleteValue !== 'function'
+            || typeof GM_getValue !== 'function') return;
+        const last = Number(GM_getValue(SUBMISSION_CLEANUP_KEY, lastSubmissionCleanup)) || 0;
+        if (last > 0 && now >= last && now - last < SUBMISSION_CLEANUP_INTERVAL) return;
         for (const key of GM_listValues()) {
             if (!key.startsWith(SUBMISSION_PREFIX)) continue;
             const when = Number(GM_getValue(key, 0));
             if (!when || now - when >= SUBMISSION_TTL || when > now) GM_deleteValue(key);
         }
+        // Share the cleanup timestamp across tabs; visible markers still check
+        // their own exact expiry without enumerating all stored entries.
+        lastSubmissionCleanup = now;
+        if (typeof GM_setValue === 'function') GM_setValue(SUBMISSION_CLEANUP_KEY, now);
     }
 
     function reconcileModeControl() {
@@ -374,7 +385,7 @@
 
     function handleMediaAction(event, media, icon) {
         if (event?.shiftKey) return copyMediaUrl(media, icon);
-        if (submissionTime(media) && !window.confirm('This item was submitted in the last 24 hours. Submit again?')) return false;
+        if (submissionTime(media) && !window.confirm(`This item was submitted in the last ${SUBMISSION_DAYS} days. Submit again?`)) return false;
         if (!confirmLargeJob(media)) return false;
         return createHazelJob(media, icon);
     }
