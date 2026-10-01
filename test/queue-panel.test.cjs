@@ -25,6 +25,86 @@ function setup(t) {
     return {w,shadow,requests,downloads,setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
 }
 
+test('manual retry controls require confirmation for all failures and offer transfer-only retry', async t => {
+    const h=setup(t);
+    h.setSnapshot({retryable_count:2,jobs:[{id:'a',title:'Prepared',state:'waiting_venus',mode:'library',label:'Transfer needs attention',error:'fixture'}]});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const retryAll=h.shadow.querySelector('[data-retry-failed]');
+    assert.equal(retryAll.hidden,false);assert.match(retryAll.textContent,/2/);
+    h.w.confirm=()=>false;retryAll.click();await h.settle();
+    assert(!h.requests.some(r=>r.url.endsWith('/retry-failed')));
+    let prompt='';h.w.confirm=message=>{prompt=message;return true;};retryAll.click();await h.settle();
+    assert.match(prompt,/older failures/);assert.match(prompt,/saved stage/);
+    assert(h.requests.some(r=>r.url.endsWith('/retry-failed')));
+    const retry=h.shadow.querySelector('[data-jobs] button');assert.equal(retry.textContent,'Retry transfer');
+    retry.click();await h.settle();
+    assert(h.requests.some(r=>r.url.endsWith('/retry')&&JSON.parse(r.data).id==='a'));
+});
+
+test('new failures turn the collapsed button red until History is reviewed', async t => {
+    const h=setup(t),button=h.shadow.querySelector('[data-toggle]');
+    const updated=Date.now()/1000+1;
+    h.setSnapshot({jobs:[{id:'a',title:'New failure',state:'failed',mode:'local',label:'Needs attention',updated,error:'fixture'}]});
+    button.click();await h.settle();h.shadow.querySelector('[data-close]').click();
+    assert.equal(button.classList.contains('needs-attention'),true);assert.match(button.textContent,/1 to check/);
+    button.click();await h.settle();
+    const history=h.shadow.querySelector('[data-history]');history.open=true;history.dispatchEvent(new h.w.Event('toggle'));
+    h.shadow.querySelector('[data-close]').click();
+    assert.equal(button.classList.contains('needs-attention'),false);
+    // A genuinely new failure on the same job must notify again after retry.
+    h.setSnapshot({jobs:[{id:'a',title:'Failed again',state:'failed',updated:updated+1,error:'fixture'}]});
+    button.click();history.open=false;await h.settle();h.shadow.querySelector('[data-close]').click();
+    assert.equal(button.classList.contains('needs-attention'),true);
+});
+
+test('duplicate jobs appear in History without retry or error attention', async t => {
+    const h=setup(t);h.setSnapshot({retryable_count:0,jobs:[{id:'a',title:'Existing track',state:'completed',label:'Duplicate',detail:'Existing file kept',updated:Date.now()/1000+1}]});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.match(h.shadow.querySelector('[data-history-jobs]').textContent,/Duplicate/);
+    assert.equal(h.shadow.querySelector('[data-history-jobs] button'),null);
+    assert.equal(h.shadow.querySelector('[data-retry-failed]').hidden,true);
+    h.shadow.querySelector('[data-close]').click();
+    assert.equal(h.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'),false);
+});
+
+test('completed rows combine count and destination into one delivery line', async t => {
+    const h=setup(t);h.setSnapshot({jobs:[
+        {id:'a',title:'Single',mode:'library',state:'completed',label:'Delivered to Venus',files:1,complete:1},
+        {id:'b',title:'Batch',mode:'local',state:'completed',label:'Saved locally',files:3,complete:3}]});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const rows=h.shadow.querySelectorAll('[data-history-jobs] article');
+    assert.equal(rows[0].querySelector('small').hidden,true);
+    assert.match(rows[0].textContent,/1\/1 file delivered to Venus/);
+    assert.equal(rows[1].querySelector('small').hidden,true);
+    assert.match(rows[1].textContent,/3\/3 files delivered locally/);
+});
+
+test('history offers independent completed and failed clearing', async t => {
+    const h=setup(t);h.setSnapshot({completed_history_count:2,failed_history_count:1});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-clear-completed]').hidden,false);
+    assert.equal(h.shadow.querySelector('[data-clear-failed]').hidden,false);
+    h.w.confirm=()=>true;h.shadow.querySelector('[data-clear-failed]').click();await h.settle();
+    assert(h.requests.some(r=>r.url.endsWith('/history/clear-failed')));
+    assert(!h.requests.some(r=>r.url.endsWith('/history/clear-completed')));
+});
+
+test('idle countdown displays minutes and seconds without sending keepalive requests', async t => {
+    const h=setup(t);h.setSnapshot({idle_remaining:272});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.shadow.querySelector('[data-sleep]').textContent,'Helper sleeps in 4:32');
+    assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
+    h.setSnapshot({active:true,idle_remaining:null});
+    h.shadow.querySelector('[data-close]').click();h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.match(h.shadow.querySelector('[data-sleep]').textContent,/stays awake while working/);
+});
+
+test('Start reconnect resumes pending work without retrying failed downloads', async t => {
+    const h=setup(t);h.shadow.querySelector('[data-wake]').click();await h.settle();
+    assert(h.requests.some(r=>r.method==='POST'&&r.url.endsWith('/resume')));
+    assert(!h.requests.some(r=>r.url.endsWith('/retry-failed')));
+});
+
 test('queue starts collapsed, has no backdrop and stays above the player area', async t => {
     const h=setup(t),host=h.w.document.getElementById('tm-beatportdl-queue');
     assert.equal(h.shadow.querySelector('[data-panel]').hidden,true);
@@ -59,7 +139,7 @@ test('direct jobs keep per-click mode and never generate TXT files', async t => 
 test('untrusted job titles are text and successful delivery does not claim Music import', async t => {
     const h=setup(t);h.setSnapshot({jobs:[{id:'a'.repeat(32),title:'<img src=x onerror=alert(1)>',state:'completed',mode:'library',label:'Delivered to Venus',files:1,complete:1}]});
     h.shadow.querySelector('[data-toggle]').click();await h.settle();
-    assert.equal(h.shadow.querySelector('img'),null);assert.match(h.shadow.textContent,/Delivered to Venus/);
+    assert.equal(h.shadow.querySelector('img'),null);assert.match(h.shadow.textContent,/1\/1 file delivered to Venus/);
     assert.doesNotMatch(h.shadow.textContent,/Apple Music importing|handled remotely by the Mac mini/);
 });
 
@@ -94,10 +174,10 @@ test('current jobs remain separate and clear history preserves logs without an u
     h.shadow.querySelector('[data-toggle]').click();await h.settle();
     assert.equal(h.shadow.querySelector('[data-jobs]').children.length,1);
     assert.equal(h.shadow.querySelector('[data-toggle]').textContent,'Downloads · 1');
-    h.w.confirm=()=>false;h.shadow.querySelector('[data-clear-history]').click();await h.settle();
+    h.w.confirm=()=>false;h.shadow.querySelector('[data-clear-completed]').click();await h.settle();
     assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
-    let prompt='';h.w.confirm=message=>{prompt=message;return true;};h.shadow.querySelector('[data-clear-history]').click();await h.settle();
-    assert(h.requests.some(r=>r.url.endsWith('/history/clear')));
+    let prompt='';h.w.confirm=message=>{prompt=message;return true;};h.shadow.querySelector('[data-clear-completed]').click();await h.settle();
+    assert(h.requests.some(r=>r.url.endsWith('/history/clear-completed')));
     assert.match(prompt,/retry log will be kept/);assert.doesNotMatch(prompt,/undo/i);
     assert.equal(h.shadow.querySelector('[data-restore-history]'),null);
     assert.doesNotMatch(h.shadow.textContent,/Undo clear/);

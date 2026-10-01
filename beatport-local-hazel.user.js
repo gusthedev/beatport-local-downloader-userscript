@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.5
+// @version      2.0.6
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.5';
+    const CORE_VERSION = '2.0.6';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -880,6 +880,59 @@
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
     let pairingRequestedAt = 0;
+    let queueSleepAt = 0, queueSleepTimer = 0;
+
+    function updateHelperCountdown() {
+        window.clearTimeout(queueSleepTimer);
+        if (!queuePanel) return;
+        const label = queuePanel.querySelector('[data-sleep]');
+        label.hidden = !queueLastSnapshot || (!queueLastSnapshot.active && !queueSleepAt);
+        if (queueLastSnapshot?.active) { label.textContent = 'Helper stays awake while working.'; return; }
+        if (!queueSleepAt || !queueLastSnapshot) return;
+        const seconds = Math.max(0, Math.ceil((queueSleepAt - performance.now()) / 1000));
+        label.textContent = `Helper sleeps in ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+        if (queuePanel.querySelector('[data-panel]').hidden || document.hidden) return;
+        if (seconds > 0) queueSleepTimer = window.setTimeout(updateHelperCountdown, 1000);
+        else {
+            label.textContent = 'Helper is going to sleep.';
+            if (queueLastSnapshot.idle_remaining > 0) pollQueue();
+        }
+    }
+    const QUEUE_ERROR_SEEN_KEY = 'beatportLoader.queueErrorsSeen.v1';
+    const QUEUE_ERROR_START_KEY = 'beatportLoader.queueErrorAlertsSince.v1';
+    let queueErrorsSeen = {};
+    let queueErrorAlertsSince = Date.now() / 1000;
+    try {
+        if (typeof GM_getValue === 'function') queueErrorAlertsSince = Number(GM_getValue(QUEUE_ERROR_START_KEY, 0)) || queueErrorAlertsSince;
+        if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_START_KEY, queueErrorAlertsSince);
+        const saved = typeof GM_getValue === 'function' ? GM_getValue(QUEUE_ERROR_SEEN_KEY, {}) : {};
+        if (saved && typeof saved === 'object' && !Array.isArray(saved)) queueErrorsSeen = saved;
+    } catch {}
+
+    function updateQueueAttention() {
+        if (!queuePanel || !queueLastSnapshot) return;
+        const open = !queuePanel.querySelector('[data-panel]').hidden;
+        const historyOpen = queuePanel.querySelector('[data-history]').open;
+        const errors = (queueLastSnapshot.jobs || []).filter(job =>
+            Number(job.updated) >= queueErrorAlertsSince && (job.state === 'failed' || job.state === 'waiting_venus' && job.error));
+        let changed = false;
+        for (const job of errors) {
+            const stamp = Number(job.updated) || 1;
+            if (open && (job.state !== 'failed' || historyOpen) && queueErrorsSeen[job.id] !== stamp) {
+                queueErrorsSeen[job.id] = stamp; changed = true;
+            }
+        }
+        if (changed) {
+            queueErrorsSeen = Object.fromEntries(Object.entries(queueErrorsSeen).sort((a,b) => b[1]-a[1]).slice(0,200));
+            try { if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_SEEN_KEY, queueErrorsSeen); } catch {}
+        }
+        const unseen = errors.filter(job => queueErrorsSeen[job.id] !== (Number(job.updated) || 1)).length;
+        const button = queuePanel.querySelector('[data-toggle]');
+        button.classList.toggle('needs-attention', !open && unseen > 0);
+        const current = queueLastSnapshot.current_count ?? (queueLastSnapshot.jobs || []).filter(job => ['queued','downloading','processing','waiting_venus'].includes(job.state)).length;
+        button.textContent = unseen ? `Downloads · ${unseen} to check` : 'Downloads' + (current ? ' · ' + current : '');
+        button.title = unseen ? 'A download needs attention. Open the panel and History to review.' : 'Open download queue';
+    }
 
     function pairingStatus(state) {
         if (!queuePanel) return;
@@ -972,11 +1025,15 @@
         if (!queuePanel) return;
         queuePanel.querySelector('[data-panel]').hidden = !open;
         queuePanel.querySelector('[data-toggle]').setAttribute('aria-expanded', String(open));
+        updateQueueAttention();
+        updateHelperCountdown();
         if (open) pollQueue();
     }
 
     function renderQueue(snapshot) {
         queueLastSnapshot = snapshot;
+        queueSleepAt = typeof snapshot.idle_remaining === 'number' ? performance.now() + snapshot.idle_remaining * 1000 : 0;
+        updateHelperCountdown();
         const jobs = snapshot.jobs || [];
         const current = jobs.filter(job => ['queued', 'downloading', 'processing', 'waiting_venus'].includes(job.state));
         const history = jobs.filter(job => ['completed', 'failed', 'cancelled'].includes(job.state));
@@ -1000,23 +1057,32 @@
         historyList.replaceChildren();
         const count = snapshot.history_count ?? history.length;
         queuePanel.querySelector('[data-history-title]').textContent = 'History' + (count ? ` · latest ${Math.min(10, history.length)} of ${count}` : ' · empty');
-        queuePanel.querySelector('[data-clear-history]').hidden = !count;
+        queuePanel.querySelector('[data-clear-completed]').hidden = !(snapshot.completed_history_count ?? history.filter(job => job.state !== 'failed').length);
+        queuePanel.querySelector('[data-clear-failed]').hidden = !(snapshot.failed_history_count ?? history.filter(job => job.state === 'failed').length);
+        const retryAll = queuePanel.querySelector('[data-retry-failed]');
+        retryAll.hidden = !(snapshot.retryable_count > 0);
+        retryAll.textContent = `Retry failed jobs (${snapshot.retryable_count || 0})`;
         for (const job of [...current, ...history.slice(0, 10)]) {
             const row = document.createElement('article');
             const title = document.createElement('strong'); title.textContent = job.title;
             const mode = document.createElement('small');
+            mode.hidden = job.state === 'completed';
             mode.textContent = job.local_exception ? 'Local exception · no Venus or Music import'
                 : job.mode === 'local' ? 'Local only' : 'Venus library';
-            const state = document.createElement('div'); state.textContent = job.label;
+            const state = document.createElement('div');
+            const delivery = job.mode === 'local' || job.local_exception ? 'locally' : 'to Venus';
+            const fileCount = `${job.complete}/${job.files} ${job.files === 1 ? 'file' : 'files'} delivered ${delivery}`;
+            state.textContent = job.state === 'completed' && job.files > 0 && job.label !== 'Duplicate' ? fileCount : job.label;
             const detail = document.createElement('small');
-            detail.textContent = job.error || job.detail || (job.files ? `${job.complete}/${job.files} files delivered` : '');
+            detail.textContent = job.error || job.detail || (job.files > 1 && job.state !== 'completed' ? fileCount : '');
+            detail.hidden = !detail.textContent;
             row.append(title, mode, state, detail);
             const isHistory = ['completed','failed','cancelled'].includes(job.state);
             if (isHistory && job.updated) {
                 const date = document.createElement('small'); date.textContent = new Date(job.updated * 1000).toLocaleString(); row.append(date);
             }
-            if (job.state === 'failed') {
-                const retry = document.createElement('button'); retry.textContent = 'Retry this job';
+            if (job.state === 'failed' || job.state === 'waiting_venus' && job.error) {
+                const retry = document.createElement('button'); retry.textContent = job.state === 'waiting_venus' ? 'Retry transfer' : 'Retry this job';
                 retry.addEventListener('click', () => panelAction('/retry', { id: job.id }));
                 row.append(retry);
             }
@@ -1027,6 +1093,7 @@
             const more = document.createElement('small'); more.textContent = `Showing ${current.length} of ${active} current jobs.`; list.append(more);
         }
         if (!history.length) historyList.textContent = 'No visible history.';
+        updateQueueAttention();
     }
 
     async function pollQueue() {
@@ -1040,10 +1107,18 @@
             again = snapshot.active || snapshot.jobs.some(job => ['queued','downloading','processing'].includes(job.state)) && !snapshot.paused;
         } catch (error) {
             queueLastSnapshot = null;
+            queueSleepAt = 0;
+            window.clearTimeout(queueSleepTimer);
+            queuePanel.querySelector('[data-sleep]').textContent = 'Helper asleep or unavailable.';
             queueMessage(error.message);
         } finally {
             queuePolling = false;
             if (again) queuePollTimer = window.setTimeout(pollQueue, 1500);
+            else if (queueLastSnapshot?.idle_remaining > 0 && !queuePanel.querySelector('[data-panel]').hidden && !document.hidden) {
+                // Read the real deadline periodically: another tab may have
+                // extended it. GET never keeps the helper awake.
+                queuePollTimer = window.setTimeout(pollQueue, Math.min(10000, queueLastSnapshot.idle_remaining * 1000 + 250));
+            }
         }
     }
 
@@ -1068,6 +1143,7 @@
             button,select { color:#f0f7f3;background:#26352e;border:1px solid #526258;border-radius:6px;padding:7px 9px;cursor:pointer; }
             button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid #01ff95;outline-offset:2px; }
             [data-toggle] { pointer-events:auto;display:block;margin-left:auto;font:12px system-ui;padding:7px 9px; }
+            [data-toggle].needs-attention { background:#8b2424;border-color:#ff8989;color:#fff; }
             section { pointer-events:auto;width:min(350px,calc(100vw - 24px));max-height:max(90px,calc(100dvh - 250px));overflow:auto;
               padding:14px;margin-top:6px;border:1px solid #41534a;border-radius:10px;background:#142019;color:#eff7f2;font:13px/1.4 system-ui;box-shadow:0 6px 20px #0005; }
             header,.actions { display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px; }
@@ -1087,10 +1163,11 @@
             <small data-pairing-status></small>
             <button type="button" data-auto-pair>Pair this browser</button>
             <div data-message role="status" aria-live="polite">Start the helper to see your saved queue.</div>
-            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect disabled>Venus · not checked</button></div>
+            <small data-sleep hidden></small>
+            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect disabled>Venus · not checked</button><button type="button" data-retry-failed hidden>Retry failed jobs</button></div>
             <div data-jobs></div>
             <details data-history><summary data-history-title>History</summary>
-              <div class="actions"><button type="button" data-clear-history hidden>Clear history</button></div>
+              <div class="actions"><button type="button" data-clear-completed hidden>Clear completed</button><button type="button" data-clear-failed hidden>Clear failed</button></div>
               <small>Only the 10 latest entries are shown. Clearing hides finished and failed jobs; files and the retry log stay untouched.</small>
               <div data-history-jobs></div>
             </details>
@@ -1101,10 +1178,15 @@
           </section>`;
         const find = selector => queuePanel.querySelector(selector);
         pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
+        find('[data-history]').addEventListener('toggle', updateQueueAttention);
+        find('[data-retry-failed]').addEventListener('click', () => {
+            const count = queueLastSnapshot?.retryable_count || 0;
+            if (count && window.confirm(`Retry ${count} failed job(s), including older failures in saved history? Each keeps its original destination and resumes from its saved stage. Finished files will not be downloaded again.`)) panelAction('/retry-failed');
+        });
         find('[data-auto-pair]').addEventListener('click', requestBrowserPairing);
         find('[data-repair-pair]').addEventListener('click', requestBrowserPairing);
-        find('[data-clear-history]').addEventListener('click', () => {
-            if (window.confirm('Clear displayed history? Downloaded files, saved jobs and the retry log will be kept.')) panelAction('/history/clear');
+        for (const kind of ['completed','failed']) find(`[data-clear-${kind}]`).addEventListener('click', () => {
+            if (window.confirm(`Clear ${kind} entries from history? Downloaded files, saved jobs and the retry log will be kept. Unfinished transfers stay visible.`)) panelAction(`/history/clear-${kind}`);
         });
         find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library';
         find('[data-mode]').addEventListener('change', event => loaderConfig.setLocalOnly(event.target.value === 'local'));
@@ -1117,7 +1199,7 @@
         });
         find('[data-wake]').addEventListener('click', () => {
             if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); queueMessage('Click Pair this browser for automatic setup.', true); return; }
-            wakeQueue().then(pollQueue).catch(error => queueMessage(error.message, true));
+            wakeQueue().then(() => helperRequest('/resume', {})).then(pollQueue).catch(error => queueMessage(error.message, true));
         });
         find('[data-save]').addEventListener('click', () => {
             const token = find('[data-token]').value.trim();
@@ -1175,7 +1257,10 @@
         installNavigationHooks();
         window.addEventListener('resize', scheduleTitlePosition, { passive: true });
         window.addEventListener('pagehide', cleanupObjectUrls, { passive: true });
-        window.addEventListener('pagehide', () => window.clearTimeout(queuePollTimer), { passive: true });
+        window.addEventListener('pagehide', () => {
+            window.clearTimeout(queuePollTimer);
+            window.clearTimeout(queueSleepTimer);
+        }, { passive: true });
         document.fonts?.ready?.then(scheduleTitlePosition).catch?.(() => {});
         document.fonts?.addEventListener?.('loadingdone', scheduleTitlePosition);
     }

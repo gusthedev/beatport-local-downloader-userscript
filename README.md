@@ -6,7 +6,11 @@ This repository contains the public browser side of a local Beatport download qu
 
 The panel starts collapsed near the top edge, away from the player. It can move to either side, collapses on outside clicks or Escape, and never places a full-page click-blocking backdrop over Beatport. It shows real queue stages, downloaded file/byte counts, per-job destination, failures and retries, and supports pasted batches and pausing after the current job. No fabricated percentage is shown. Delivered files are not described as already imported into a music app.
 
-Current downloads remain in the main view. Finished and failed jobs appear in collapsed History, with only the latest 10 rendered and dated. Old failures do not set the top error badge. Clear history hides terminal entries without deleting audio, saved jobs, or retry logs; there is no Undo clear control. Pending downloads and files waiting for delivery are never hidden by clearing history.
+Current downloads remain in the main view. Finished and failed jobs appear in collapsed History, with only the latest 10 rendered and dated. **Clear completed** and **Clear failed** independently hide those entries without deleting audio, saved jobs, or retry logs. Pending transfers are never hidden. **Retry failed jobs** confirms the total, including older failures, before resuming saved stages; individual failed transfers also have **Retry transfer**.
+
+Core 2.0.6 turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
+
+The updated helper stays available for three idle minutes, then exits completely. The panel shows the helper's actual remaining minutes/seconds, with a lightweight status refresh while visible to account for activity in other tabs. Status reads never extend the idle deadline. Work in progress keeps the helper awake. **Start / reconnect** resumes pending work, but does not automatically retry failed downloads.
 
 The Venus button reads **Venus Connected** and is disabled when already mounted, or **Venus Disconnected** and can be clicked to connect. Until the helper checks, it reads **Venus · not checked**. The panel does not repeat the fixed remote-import explanation.
 
@@ -38,7 +42,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.2** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.5** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.6** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -53,7 +57,7 @@ If you have an older loader, update it to **1.6.2** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.5**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.6**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 ### Safari 27 playback
 
