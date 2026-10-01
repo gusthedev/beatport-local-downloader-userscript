@@ -879,6 +879,7 @@
     const HELPER_URL = 'http://127.0.0.1:17854';
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
+    let queuePageHidden = false;
     let pairingRequestedAt = 0;
     let queueSleepAt = 0, queueSleepTimer = 0;
 
@@ -891,7 +892,7 @@
         if (!queueSleepAt || !queueLastSnapshot) return;
         const seconds = Math.max(0, Math.ceil((queueSleepAt - performance.now()) / 1000));
         label.textContent = `Helper sleeps in ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
-        if (queuePanel.querySelector('[data-panel]').hidden || document.hidden) return;
+        if (queuePanel.querySelector('[data-panel]').hidden || document.hidden || queuePageHidden) return;
         if (seconds > 0) queueSleepTimer = window.setTimeout(updateHelperCountdown, 1000);
         else {
             label.textContent = 'Helper is going to sleep.';
@@ -1096,15 +1097,30 @@
         updateQueueAttention();
     }
 
+    function queueHasActiveWork() {
+        return queueLastSnapshot && (queueLastSnapshot.active ||
+            !queueLastSnapshot.paused && queueLastSnapshot.jobs.some(job => ['queued','downloading','processing'].includes(job.state)));
+    }
+
+    function suspendQueuePolling() {
+        window.clearTimeout(queuePollTimer);
+        window.clearTimeout(queueSleepTimer);
+    }
+
+    function resumeQueuePolling() {
+        if (!queuePanel || document.hidden || queuePageHidden) return;
+        // A collapsed queue still observes active work for new failures. An
+        // idle collapsed queue must not start a permanent polling loop.
+        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork()) pollQueue();
+    }
+
     async function pollQueue() {
         window.clearTimeout(queuePollTimer);
-        if (queuePolling || !queuePanel || document.hidden) return;
+        if (queuePolling || !queuePanel || document.hidden || queuePageHidden) return;
         queuePolling = true;
-        let again = false;
         try {
             const snapshot = await helperRequest('/jobs');
             renderQueue(snapshot);
-            again = snapshot.active || snapshot.jobs.some(job => ['queued','downloading','processing'].includes(job.state)) && !snapshot.paused;
         } catch (error) {
             queueLastSnapshot = null;
             queueSleepAt = 0;
@@ -1113,8 +1129,8 @@
             queueMessage(error.message);
         } finally {
             queuePolling = false;
-            if (again) queuePollTimer = window.setTimeout(pollQueue, 1500);
-            else if (queueLastSnapshot?.idle_remaining > 0 && !queuePanel.querySelector('[data-panel]').hidden && !document.hidden) {
+            if (!document.hidden && !queuePageHidden && queueHasActiveWork()) queuePollTimer = window.setTimeout(pollQueue, 1500);
+            else if (queueLastSnapshot?.idle_remaining > 0 && !queuePanel.querySelector('[data-panel]').hidden && !document.hidden && !queuePageHidden) {
                 // Read the real deadline periodically: another tab may have
                 // extended it. GET never keeps the helper awake.
                 queuePollTimer = window.setTimeout(pollQueue, Math.min(10000, queueLastSnapshot.idle_remaining * 1000 + 250));
@@ -1221,7 +1237,18 @@
         queuePanel.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); event.stopPropagation(); });
         window.addEventListener('pointerdown', event => { if (!event.composedPath().includes(queueHost)) setQueueOpen(false); }, { passive:true });
         window.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); });
-        document.addEventListener('visibilitychange', () => { if (!document.hidden && !find('[data-panel]').hidden) pollQueue(); });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) suspendQueuePolling();
+            else resumeQueuePolling();
+        });
+        window.addEventListener('pagehide', () => {
+            queuePageHidden = true;
+            suspendQueuePolling();
+        }, { passive: true });
+        window.addEventListener('pageshow', event => {
+            queuePageHidden = false;
+            if (event.persisted) resumeQueuePolling();
+        }, { passive: true });
         document.documentElement.appendChild(queueHost);
         instance.showQueue = () => setQueueOpen(true);
         // Discover an already-awake helper without launching anything. This
@@ -1257,10 +1284,6 @@
         installNavigationHooks();
         window.addEventListener('resize', scheduleTitlePosition, { passive: true });
         window.addEventListener('pagehide', cleanupObjectUrls, { passive: true });
-        window.addEventListener('pagehide', () => {
-            window.clearTimeout(queuePollTimer);
-            window.clearTimeout(queueSleepTimer);
-        }, { passive: true });
         document.fonts?.ready?.then(scheduleTitlePosition).catch?.(() => {});
         document.fonts?.addEventListener?.('loadingdone', scheduleTitlePosition);
     }
