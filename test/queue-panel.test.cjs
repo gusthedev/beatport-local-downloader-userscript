@@ -447,3 +447,186 @@ test('a browser-origin rejection is not mislabeled as broken pairing', async t =
     assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden,true);
     assert.doesNotMatch(h.shadow.querySelector('[data-pairing-status]').textContent,/needs repair/);
 });
+
+// Control only window timers; lifecycle tests never wait on wall-clock polling.
+function queueClock(h) {
+    let nextId = 1;
+    const timers = new Map();
+    h.w.setTimeout = (fn, delay) => { const id = nextId++; timers.set(id, {fn, delay}); return id; };
+    h.w.clearTimeout = id => timers.delete(id);
+    return {
+        delays: () => [...timers.values()].map(timer => timer.delay),
+        async tick(delay) {
+            const entry = [...timers].find(([, timer]) => timer.delay === delay);
+            assert(entry, `expected a ${delay}ms timer`);
+            timers.delete(entry[0]); entry[1].fn(); await h.settle();
+        },
+    };
+}
+
+for (const lifecycle of ['visibility', 'bfcache']) {
+    function suspend(h) {
+        if (lifecycle === 'visibility') {
+            Object.defineProperty(h.w.document, 'hidden', {configurable:true, value:true});
+            h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
+        } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pagehide', {persisted:true}));
+    }
+    function restore(h) {
+        if (lifecycle === 'visibility') {
+            Object.defineProperty(h.w.document, 'hidden', {configurable:true, value:false});
+            h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
+        } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
+    }
+
+    test(`${lifecycle}: remote review while suspended preserves active polling and later failure attention`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await Promise.all([a.settle(), b.settle()]);
+        const clock = queueClock(b), button = b.shadow.querySelector('[data-toggle]');
+        await showFailures(a, [failure('same', 100)]);
+        b.setSnapshot({active:true});
+        await showFailures(b, [failure('same', 100), {id:'work', title:'Track', state:'downloading'}]);
+        b.shadow.querySelector('[data-close]').click();
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.deepEqual(clock.delays(), [1500]);
+
+        suspend(b);
+        const requests = b.requests.length;
+        reviewHistory(a); storage.flush();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.equal(button.textContent, 'Downloads · 1');
+        assert.equal(b.requests.length, requests);
+        assert.deepEqual(clock.delays(), [], 'remote review must not restart suspended polling');
+
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1);
+        assert.equal(b.shadow.querySelector('[data-panel]').hidden, true);
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), [1500]);
+        b.setSnapshot({active:false, idle_remaining:180, jobs:[failure('same', 120)]});
+        await clock.tick(1500);
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.match(button.textContent, /1 to check/);
+        assert.deepEqual(storage.get(SEEN_KEY), {same:100});
+        assert.deepEqual(clock.delays(), []);
+        assert([...a.requests, ...b.requests].every(r => r.method === 'GET' && r.url.endsWith('/jobs')));
+        assert.equal(a.downloads.length + b.downloads.length, 0);
+    });
+
+    test(`${lifecycle}: delayed remote review survives an older in-flight restore response`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await Promise.all([a.settle(), b.settle()]);
+        const clock = queueClock(b), button = b.shadow.querySelector('[data-toggle]');
+        await showFailures(a, [failure('same', 120)]);
+        b.setSnapshot({active:true});
+        await showFailures(b, [failure('same', 100)]);
+        b.shadow.querySelector('[data-close]').click();
+        suspend(b);
+        // BFCache may defer value-change delivery until after restoration.
+        reviewHistory(a);
+        let pending;
+        b.w.GM_xmlhttpRequest = request => { b.requests.push(request); pending = request; };
+        const requests = b.requests.length;
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1);
+        assert(pending);
+        storage.flush();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.equal(b.requests.length, requests + 1, 'remote review must not issue a second GET');
+        assert.deepEqual(clock.delays(), []);
+        // The old response arrives while suspended again and must neither
+        // regress the remote acknowledgment nor rearm either queue timer.
+        suspend(b);
+        const snapshot = {active:false, paused:false, idle_remaining:180, jobs:[failure('same', 100)]};
+        pending.onload({status:200, responseText:JSON.stringify(snapshot)});
+        await b.settle();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), []);
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1, 'collapsed idle restore must stay idle');
+
+        button.click();
+        pending.onload({status:200, responseText:JSON.stringify(snapshot)});
+        await b.settle(); reviewHistory(b); storage.flush({reverse:true});
+        assert.deepEqual(storage.get(SEEN_KEY), {same:120}, 'reviewing stale History must not lower the watermark');
+        assert.equal(storage.writes.filter(write => write.key === SEEN_KEY).length, 1);
+        assert.deepEqual(clock.delays(), [1000, 10000]);
+        assert([...a.requests, ...b.requests].every(r => r.method === 'GET' && r.url.endsWith('/jobs')));
+        assert.equal(a.downloads.length + b.downloads.length, 0);
+    });
+
+    test(`${lifecycle}: collapsed active observation resumes and reports a later failure`, async t => {
+        const h=setup(t);await h.settle();const clock=queueClock(h);
+        const button=h.shadow.querySelector('[data-toggle]');
+        h.setSnapshot({active:true,jobs:[{id:'a',state:'downloading',title:'Track'}]});
+        button.click();await h.settle();h.shadow.querySelector('[data-close]').click();
+        assert.deepEqual(clock.delays(),[1500]);
+        const hiddenRequests=h.requests.length;
+        suspend(h);await h.settle();
+        // Main leaves this timer alive until it fires while hidden; exercise
+        // that original failure path too, rather than failing only on cleanup.
+        if (clock.delays().includes(1500)) await clock.tick(1500);
+        assert.deepEqual(clock.delays(),[]);assert.equal(h.requests.length,hiddenRequests);
+        const before=h.requests.length;
+        restore(h);await h.settle();assert.equal(h.requests.length,before+1);
+        assert.equal(h.shadow.querySelector('[data-panel]').hidden,true);
+        assert.deepEqual(clock.delays(),[1500]);
+        h.setSnapshot({active:false,idle_remaining:180,jobs:[{id:'a',state:'failed',title:'Track',error:'fixture',updated:Date.now()/1000+1}]});
+        await clock.tick(1500);
+        assert.equal(button.classList.contains('needs-attention'),true);
+        assert.match(button.textContent,/1 to check/);
+        assert.deepEqual(clock.delays(),[]);
+        const stopped=h.requests.length;
+        suspend(h);restore(h);await h.settle();
+        assert.equal(h.requests.length,stopped);
+        assert(h.requests.every(r=>r.method==='GET'));
+        assert.equal(h.downloads.length,0);
+    });
+
+    test(`${lifecycle}: an in-flight response cannot rearm suspended timers`, async t => {
+        const h=setup(t);await h.settle();const clock=queueClock(h);
+        let pending;
+        h.w.GM_xmlhttpRequest=request=>{h.requests.push(request);pending=request;};
+        h.shadow.querySelector('[data-toggle]').click();
+        h.shadow.querySelector('[data-close]').click();suspend(h);
+        // Queued, unpaused work also counts, even without snapshot.active.
+        pending.onload({status:200,responseText:JSON.stringify({active:false,paused:false,jobs:[{id:'a',state:'queued',title:'Track'}]})});
+        await h.settle();assert.deepEqual(clock.delays(),[]);
+        const before=h.requests.length;
+        restore(h);await h.settle();assert.equal(h.requests.length,before+1);
+        // Overlapping restore notifications must not duplicate an in-flight GET.
+        restore(h);await h.settle();assert.equal(h.requests.length,before+1);
+        pending.onload({status:200,responseText:JSON.stringify({active:false,paused:false,jobs:[{id:'a',state:'processing',title:'Track'}]})});
+        await h.settle();assert.deepEqual(clock.delays(),[1500]);
+        suspend(h);restore(h);
+        pending.onerror();await h.settle();assert.deepEqual(clock.delays(),[]);
+        const unavailable=h.requests.length;
+        suspend(h);restore(h);await h.settle();assert.equal(h.requests.length,unavailable);
+        assert(h.requests.every(r=>r.method==='GET'));assert.equal(h.downloads.length,0);
+    });
+
+    test(`${lifecycle}: open idle countdown resumes at the existing cadence`, async t => {
+        const h=setup(t);await h.settle();const clock=queueClock(h);
+        h.setSnapshot({idle_remaining:180});
+        h.shadow.querySelector('[data-toggle]').click();await h.settle();
+        assert.deepEqual(clock.delays(),[1000,10000]);
+        suspend(h);assert.deepEqual(clock.delays(),[]);
+        restore(h);await h.settle();assert.deepEqual(clock.delays(),[1000,10000]);
+        h.setSnapshot({idle_remaining:2});await clock.tick(10000);
+        assert.deepEqual(clock.delays(),[1000,2250]);
+        h.setSnapshot({idle_remaining:0});await clock.tick(2250);
+        assert.deepEqual(clock.delays(),[]);
+        assert(h.requests.every(r=>r.method==='GET'));assert.equal(h.downloads.length,0);
+    });
+
+    test(`${lifecycle}: collapsed paused work stays idle`, async t => {
+        const h=setup(t);await h.settle();const clock=queueClock(h);
+        h.setSnapshot({active:false,paused:true,jobs:[{id:'a',state:'queued',title:'Track'}]});
+        h.shadow.querySelector('[data-toggle]').click();await h.settle();
+        h.shadow.querySelector('[data-close]').click();
+        const before=h.requests.length;
+        suspend(h);restore(h);await h.settle();
+        assert.equal(h.requests.length,before);assert.deepEqual(clock.delays(),[]);
+    });
+}
