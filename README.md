@@ -42,7 +42,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.2** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.6** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.7** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -57,7 +57,7 @@ If you have an older loader, update it to **1.6.2** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.6**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.7**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 ### Safari 27 playback
 
@@ -79,3 +79,11 @@ The repository contains no Beatport username, password, pairing tokens, personal
 ## Development checks
 
 Run `npm ci` followed by `npm test` with Node.js 18 or newer. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
+
+Pull requests that change `beatport-local-hazel.user.js` must change its semantic `@version` relative to the PR base. Keep `CORE_VERSION` equal to `@version`. CI compares the tested PR merge result with its exact base, fetching only that base at depth one; dependency-only (including Dependabot), workflow-only, documentation-only, and loader-only changes do not require a core bump. Only bump a loader version when that loader changes.
+
+To run the same check locally with the base and candidate commits available locally (CI uses the PR merge commit as the candidate):
+
+```sh
+node scripts/check-shared-core-version.cjs <base-sha> <candidate-sha> beatport-local-hazel.user.js CORE_VERSION
+```
