@@ -907,8 +907,37 @@
         if (typeof GM_getValue === 'function') queueErrorAlertsSince = Number(GM_getValue(QUEUE_ERROR_START_KEY, 0)) || queueErrorAlertsSince;
         if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_START_KEY, queueErrorAlertsSince);
         const saved = typeof GM_getValue === 'function' ? GM_getValue(QUEUE_ERROR_SEEN_KEY, {}) : {};
-        if (saved && typeof saved === 'object' && !Array.isArray(saved)) queueErrorsSeen = saved;
+        queueErrorsSeen = mergeQueueErrorsSeen(saved);
     } catch {}
+
+    function mergeQueueErrorsSeen(...records) {
+        const merged = Object.create(null);
+        for (const record of records) {
+            if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+            for (const [id, stamp] of Object.entries(record)) {
+                if (typeof stamp === 'number' && Number.isFinite(stamp) && stamp > 0) {
+                    merged[id] = Math.max(merged[id] || 0, stamp);
+                }
+            }
+        }
+        // Deterministic pruning also makes simultaneous capped writes converge.
+        return Object.fromEntries(Object.entries(merged)
+            .sort((a,b) => b[1]-a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0,200));
+    }
+
+    function syncQueueErrorsSeen(...records) {
+        let saved = {};
+        try { if (typeof GM_getValue === 'function') saved = GM_getValue(QUEUE_ERROR_SEEN_KEY, {}); } catch {}
+        queueErrorsSeen = mergeQueueErrorsSeen(queueErrorsSeen, saved, ...records);
+        const entries = Object.entries(queueErrorsSeen);
+        const same = saved && typeof saved === 'object' && !Array.isArray(saved)
+            && Object.keys(saved).length === entries.length && entries.every(([id, stamp]) => saved[id] === stamp);
+        // Read/merge before writing, then repair overlapping writes via the
+        // listener below. GM storage has no atomic read/modify/write operation.
+        if (!same) {
+            try { if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_SEEN_KEY, queueErrorsSeen); } catch {}
+        }
+    }
 
     function updateQueueAttention() {
         if (!queuePanel || !queueLastSnapshot) return;
@@ -916,18 +945,17 @@
         const historyOpen = queuePanel.querySelector('[data-history]').open;
         const errors = (queueLastSnapshot.jobs || []).filter(job =>
             Number(job.updated) >= queueErrorAlertsSince && (job.state === 'failed' || job.state === 'waiting_venus' && job.error));
-        let changed = false;
+        const reviewed = Object.create(null);
         for (const job of errors) {
             const stamp = Number(job.updated) || 1;
-            if (open && (job.state !== 'failed' || historyOpen) && queueErrorsSeen[job.id] !== stamp) {
-                queueErrorsSeen[job.id] = stamp; changed = true;
+            if (open && (job.state !== 'failed' || historyOpen)) {
+                reviewed[job.id] = Math.max(reviewed[job.id] || 0, stamp);
             }
         }
-        if (changed) {
-            queueErrorsSeen = Object.fromEntries(Object.entries(queueErrorsSeen).sort((a,b) => b[1]-a[1]).slice(0,200));
-            try { if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_SEEN_KEY, queueErrorsSeen); } catch {}
-        }
-        const unseen = errors.filter(job => queueErrorsSeen[job.id] !== (Number(job.updated) || 1)).length;
+        syncQueueErrorsSeen(reviewed);
+        // A stale snapshot must not regress a newer acknowledgment. A later
+        // failure of the same job still needs review when its timestamp advances.
+        const unseen = errors.filter(job => !(queueErrorsSeen[job.id] >= (Number(job.updated) || 1))).length;
         const button = queuePanel.querySelector('[data-toggle]');
         button.classList.toggle('needs-attention', !open && unseen > 0);
         const current = queueLastSnapshot.current_count ?? (queueLastSnapshot.jobs || []).filter(job => ['queued','downloading','processing','waiting_venus'].includes(job.state)).length;
@@ -1195,6 +1223,17 @@
         const find = selector => queuePanel.querySelector(selector);
         pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
         find('[data-history]').addEventListener('toggle', updateQueueAttention);
+        try {
+            if (typeof GM_addValueChangeListener === 'function') {
+                GM_addValueChangeListener(QUEUE_ERROR_SEEN_KEY, (_key, oldValue, newValue, remote) => {
+                    if (!remote) return; // Our local state already includes this write.
+                    // Include the overwritten value and read current storage too:
+                    // notifications may arrive after another tab has written again.
+                    syncQueueErrorsSeen(oldValue, newValue);
+                    updateQueueAttention(); // Repaint cached status; never wake/poll the helper.
+                });
+            }
+        } catch {}
         find('[data-retry-failed]').addEventListener('click', () => {
             const count = queueLastSnapshot?.retryable_count || 0;
             if (count && window.confirm(`Retry ${count} failed job(s), including older failures in saved history? Each keeps its original destination and resumes from its saved stage. Finished files will not be downloaded again.`)) panelAction('/retry-failed');

@@ -4,8 +4,55 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'beatport-local-hazel.user.js'), 'utf8');
+const SEEN_KEY = 'beatportLoader.queueErrorsSeen.v1';
+const ALERTS_SINCE_KEY = 'beatportLoader.queueErrorAlertsSince.v1';
 
-function setup(t) {
+// Separate JS realms share serialized GM storage. Notifications are queued so
+// tests can overlap writes and deliver remote changes after a tab becomes stale.
+function sharedStorage(initial = {}) {
+    const values = new Map(Object.entries(initial)), listeners = new Map(), pending = [], writes = [];
+    let nextId = 1;
+    const copy = value => value === undefined ? value : JSON.parse(JSON.stringify(value));
+    return {
+        writes,
+        get: key => copy(values.get(key)),
+        attach(w) {
+            let staleSeen;
+            w.GM_getValue = (key, fallback) => {
+                if (key === SEEN_KEY && staleSeen !== undefined) {
+                    const value = staleSeen; staleSeen = undefined; return copy(value);
+                }
+                return copy(values.has(key) ? values.get(key) : fallback);
+            };
+            w.GM_setValue = (key, value) => {
+                const oldValue = copy(values.get(key)), newValue = copy(value);
+                values.set(key, newValue); writes.push({key, value:newValue});
+                for (const [id, listener] of listeners) {
+                    if (listener.key === key) pending.push({id, key, oldValue, newValue, remote:listener.w !== w});
+                }
+            };
+            w.GM_addValueChangeListener = (key, fn) => {
+                const id = nextId++; listeners.set(id, {key, fn, w}); return id;
+            };
+            w.GM_removeValueChangeListener = id => listeners.delete(id);
+            return {
+                // Model two read/modify/write operations reading the same value.
+                staleSeenRead(value) { staleSeen = copy(value); },
+                detach() { for (const [id, listener] of listeners) if (listener.w === w) listeners.delete(id); },
+            };
+        },
+        flush({reverse = false} = {}) {
+            let delivered = 0;
+            while (pending.length) {
+                assert(++delivered < 1000, 'storage listeners must converge without an echo loop');
+                const event = reverse ? pending.pop() : pending.shift();
+                listeners.get(event.id)?.fn(event.key, copy(event.oldValue), copy(event.newValue), event.remote);
+            }
+        },
+    };
+}
+
+function setup(t, storage = sharedStorage()) {
     const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/example/123">Example</a></article><button id="player">Play</button></main>',
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
     const w = dom.window, requests = [], downloads = [];
@@ -19,10 +66,11 @@ function setup(t) {
     w.BEATPORTDL_CONFIG = {helperEnabled:true,getHelperToken:()=> 'a'.repeat(64),setHelperToken(){},
         get localOnly(){return local;},setLocalOnly(value){local=value;modeChange?.();},onModeChange(fn){modeChange=fn;}};
     w.GM_xmlhttpRequest = request => { requests.push(request);request.onload({status:200,responseText:JSON.stringify(request.url.endsWith('/jobs')&&request.method==='GET'?snapshot:{accepted:true})}); };
+    const storageTab = storage.attach(w);
     w.__TM_BEATPORTDL_TEST_MODE__ = {};
     w.eval(source);
-    t.after(()=>{w.__TM_BEATPORTDL_TEST_HOOKS__.instance.observer.disconnect();w.close();});
-    return {w,shadow,requests,downloads,setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
+    t.after(()=>{storageTab.detach();w.__TM_BEATPORTDL_TEST_HOOKS__.instance.observer.disconnect();w.close();});
+    return {w,shadow,requests,downloads,storageTab,setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
 }
 
 test('manual retry controls require confirmation for all failures and offer transfer-only retry', async t => {
@@ -56,6 +104,165 @@ test('new failures turn the collapsed button red until History is reviewed', asy
     button.click();history.open=false;await h.settle();h.shadow.querySelector('[data-close]').click();
     assert.equal(button.classList.contains('needs-attention'),true);
 });
+
+const failure = (id, updated) => ({id, updated, title:id, state:'failed', error:'fixture'});
+async function showFailures(h, jobs) {
+    h.setSnapshot({jobs});
+    h.shadow.querySelector('[data-toggle]').click();
+    await h.settle();
+}
+function reviewHistory(h) {
+    const history = h.shadow.querySelector('[data-history]');
+    history.open = true;
+    history.dispatchEvent(new h.w.Event('toggle'));
+}
+
+test('remote History review clears collapsed attention without polling or waking the helper', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage);
+    await showFailures(a, [failure('a', 100)]);
+    await showFailures(b, [failure('a', 100)]);
+    const button = b.shadow.querySelector('[data-toggle]');
+    b.shadow.querySelector('[data-close]').click();
+    assert.equal(button.classList.contains('needs-attention'), true);
+    assert.match(button.textContent, /1 to check/);
+    assert.equal(storage.get(SEEN_KEY), undefined, 'opening the panel alone does not review failed History');
+    const requests = [a.requests.length, b.requests.length];
+    reviewHistory(a); storage.flush();
+    assert.equal(button.classList.contains('needs-attention'), false);
+    assert.equal(button.textContent, 'Downloads');
+    assert.equal(button.title, 'Open download queue');
+    assert.equal(b.shadow.querySelector('[data-panel]').hidden, true);
+    assert.equal(b.shadow.querySelector('[data-history]').open, false);
+    assert.deepEqual([a.requests.length, b.requests.length], requests);
+    assert([...a.requests, ...b.requests].every(r => r.method === 'GET'));
+    assert.equal(a.downloads.length + b.downloads.length, 0);
+    assert.equal(storage.writes.filter(write => write.key === SEEN_KEY).length, 1, 'no echo writes for equal state');
+});
+
+test('a stale tab reads and merges stored acknowledgments before reviewing another failure', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage);
+    await showFailures(a, [failure('a', 100)]);
+    await showFailures(b, [failure('b', 101)]);
+    reviewHistory(a);
+    // B has received no value-change notification yet.
+    reviewHistory(b);
+    assert.deepEqual(storage.get(SEEN_KEY), {a:100, b:101});
+    storage.flush();
+    assert.deepEqual(storage.get(SEEN_KEY), {a:100, b:101});
+});
+
+for (const reverse of [false, true]) {
+    test(`concurrent acknowledgments converge with ${reverse ? 'reversed' : 'ordered'} notifications`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await showFailures(a, [failure('a', 100), failure('same', 110)]);
+        await showFailures(b, [failure('b', 101), failure('same', 105)]);
+        a.storageTab.staleSeenRead({}); reviewHistory(a);
+        b.storageTab.staleSeenRead({}); reviewHistory(b);
+        assert.deepEqual(storage.get(SEEN_KEY), {b:101, same:105}, 'both writes started from the same old value');
+        storage.flush({reverse});
+        assert.deepEqual(storage.get(SEEN_KEY), {a:100, b:101, same:110});
+        for (const h of [a, b]) {
+            h.shadow.querySelector('[data-close]').click();
+            assert.equal(h.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'), false);
+            assert.equal(h.shadow.querySelector('[data-toggle]').textContent, 'Downloads');
+        }
+        storage.flush({reverse});
+        const writes = storage.writes.length;
+        storage.flush();
+        assert.equal(storage.writes.length, writes);
+        assert(storage.writes.filter(write => write.key === SEEN_KEY).length <= 4, 'repair converges in a bounded number of writes');
+    });
+}
+
+test('a new failure after retry needs a new review and an older tab cannot lower its acknowledgment', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage);
+    await showFailures(a, [failure('same', 100)]);
+    await showFailures(b, [failure('same', 100)]);
+    b.shadow.querySelector('[data-close]').click();
+    reviewHistory(a); storage.flush();
+    a.setSnapshot({jobs:[{id:'same', title:'Retrying', state:'queued'}], paused:true});
+    a.shadow.querySelector('[data-history-jobs] button').click(); await a.settle();
+    assert(a.requests.some(r => r.method === 'POST' && r.url.endsWith('/retry')));
+    a.shadow.querySelector('[data-history]').open = false;
+    a.shadow.querySelector('[data-close]').click();
+    await showFailures(a, [failure('same', 120)]);
+    a.shadow.querySelector('[data-close]').click();
+    const button = a.shadow.querySelector('[data-toggle]');
+    assert.equal(button.classList.contains('needs-attention'), true);
+    assert.match(button.textContent, /1 to check/);
+    assert.deepEqual(storage.get(SEEN_KEY), {same:100});
+    button.click(); await a.settle(); reviewHistory(a); storage.flush();
+    assert.deepEqual(storage.get(SEEN_KEY), {same:120});
+    // B still has the pre-retry failure snapshot, but reviewing it must not
+    // downgrade the watermark or make that older failure look unseen again.
+    b.shadow.querySelector('[data-toggle]').click(); await b.settle(); reviewHistory(b);
+    b.shadow.querySelector('[data-close]').click(); storage.flush();
+    assert.deepEqual(storage.get(SEEN_KEY), {same:120});
+    assert.equal(b.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'), false);
+});
+
+test('concurrent merges keep the newest 200 entries with a stable tie-break at the cap', async t => {
+    const initial = Object.fromEntries(Array.from({length:199}, (_, i) => ['old' + i, 100]));
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50, [SEEN_KEY]:initial});
+    const a = setup(t, storage), b = setup(t, storage);
+    await showFailures(a, [failure('z', 100), failure('new', 200)]);
+    await showFailures(b, [failure('a', 100)]);
+    a.storageTab.staleSeenRead(initial); reviewHistory(a);
+    b.storageTab.staleSeenRead(initial); reviewHistory(b);
+    storage.flush({reverse:true});
+    const seen = storage.get(SEEN_KEY);
+    assert.equal(Object.keys(seen).length, 200);
+    assert.equal(seen.new, 200); assert.equal(seen.a, 100);
+    assert.equal(seen.z, undefined);
+    assert.equal(seen.old99, undefined);
+    assert(storage.writes.filter(write => write.key === SEEN_KEY).every(write => Object.keys(write.value).length <= 200));
+    const c = setup(t, storage);
+    await showFailures(c, [failure('new', 200), failure('a', 100)]);
+    c.shadow.querySelector('[data-close]').click();
+    assert.equal(c.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'), false);
+});
+
+test('remote acknowledgment preserves historical suppression and transfer review semantics', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage);
+    const jobs = [failure('historical', 1), failure('failed', 100),
+        {...failure('transfer', 101), state:'waiting_venus'}];
+    await showFailures(b, jobs);
+    // The visible current transfer is reviewed without expanding History.
+    assert.deepEqual(storage.get(SEEN_KEY), {transfer:101});
+    b.shadow.querySelector('[data-close]').click();
+    await showFailures(a, jobs); reviewHistory(a); storage.flush();
+    assert.deepEqual(storage.get(SEEN_KEY), {transfer:101, failed:100});
+    assert.equal(b.shadow.querySelector('[data-toggle]').textContent, 'Downloads · 1');
+    assert.equal(b.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'), false);
+    // An expanded History inside a collapsed panel does not review new errors.
+    reviewHistory(b); storage.flush();
+    assert.equal(b.shadow.querySelector('[data-panel]').hidden, true);
+});
+
+for (const active of [true, false]) {
+    test(`remote review leaves ${active ? 'active' : 'idle'} polling timers unchanged`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await Promise.all([a.settle(), b.settle()]);
+        const timerCalls = [];
+        b.w.setTimeout = (fn, delay) => { timerCalls.push(['set', delay]); return timerCalls.length; };
+        b.w.clearTimeout = id => timerCalls.push(['clear', id]);
+        b.setSnapshot({active, idle_remaining:active ? null : 180});
+        await showFailures(b, [failure('a', 100)]);
+        assert.deepEqual(timerCalls.filter(([kind]) => kind === 'set').map(([, delay]) => delay), active ? [1500] : [1000, 10000]);
+        const before = [...timerCalls], requests = b.requests.length;
+        await showFailures(a, [failure('a', 100)]); reviewHistory(a); storage.flush();
+        assert.deepEqual(timerCalls, before);
+        assert.equal(b.requests.length, requests);
+        assert.equal(b.downloads.length, 0);
+        assert.equal(b.shadow.querySelector('[data-toggle]').textContent, 'Downloads');
+    });
+}
 
 test('duplicate jobs appear in History without retry or error attention', async t => {
     const h=setup(t);h.setSnapshot({retryable_count:0,jobs:[{id:'a',title:'Existing track',state:'completed',label:'Duplicate',detail:'Existing file kept',updated:Date.now()/1000+1}]});
@@ -270,6 +477,84 @@ for (const lifecycle of ['visibility', 'bfcache']) {
             h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
         } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
     }
+
+    test(`${lifecycle}: remote review while suspended preserves active polling and later failure attention`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await Promise.all([a.settle(), b.settle()]);
+        const clock = queueClock(b), button = b.shadow.querySelector('[data-toggle]');
+        await showFailures(a, [failure('same', 100)]);
+        b.setSnapshot({active:true});
+        await showFailures(b, [failure('same', 100), {id:'work', title:'Track', state:'downloading'}]);
+        b.shadow.querySelector('[data-close]').click();
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.deepEqual(clock.delays(), [1500]);
+
+        suspend(b);
+        const requests = b.requests.length;
+        reviewHistory(a); storage.flush();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.equal(button.textContent, 'Downloads · 1');
+        assert.equal(b.requests.length, requests);
+        assert.deepEqual(clock.delays(), [], 'remote review must not restart suspended polling');
+
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1);
+        assert.equal(b.shadow.querySelector('[data-panel]').hidden, true);
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), [1500]);
+        b.setSnapshot({active:false, idle_remaining:180, jobs:[failure('same', 120)]});
+        await clock.tick(1500);
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.match(button.textContent, /1 to check/);
+        assert.deepEqual(storage.get(SEEN_KEY), {same:100});
+        assert.deepEqual(clock.delays(), []);
+        assert([...a.requests, ...b.requests].every(r => r.method === 'GET' && r.url.endsWith('/jobs')));
+        assert.equal(a.downloads.length + b.downloads.length, 0);
+    });
+
+    test(`${lifecycle}: delayed remote review survives an older in-flight restore response`, async t => {
+        const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+        const a = setup(t, storage), b = setup(t, storage);
+        await Promise.all([a.settle(), b.settle()]);
+        const clock = queueClock(b), button = b.shadow.querySelector('[data-toggle]');
+        await showFailures(a, [failure('same', 120)]);
+        b.setSnapshot({active:true});
+        await showFailures(b, [failure('same', 100)]);
+        b.shadow.querySelector('[data-close]').click();
+        suspend(b);
+        // BFCache may defer value-change delivery until after restoration.
+        reviewHistory(a);
+        let pending;
+        b.w.GM_xmlhttpRequest = request => { b.requests.push(request); pending = request; };
+        const requests = b.requests.length;
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1);
+        assert(pending);
+        storage.flush();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.equal(b.requests.length, requests + 1, 'remote review must not issue a second GET');
+        assert.deepEqual(clock.delays(), []);
+        // The old response arrives while suspended again and must neither
+        // regress the remote acknowledgment nor rearm either queue timer.
+        suspend(b);
+        const snapshot = {active:false, paused:false, idle_remaining:180, jobs:[failure('same', 100)]};
+        pending.onload({status:200, responseText:JSON.stringify(snapshot)});
+        await b.settle();
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), []);
+        restore(b); await b.settle();
+        assert.equal(b.requests.length, requests + 1, 'collapsed idle restore must stay idle');
+
+        button.click();
+        pending.onload({status:200, responseText:JSON.stringify(snapshot)});
+        await b.settle(); reviewHistory(b); storage.flush({reverse:true});
+        assert.deepEqual(storage.get(SEEN_KEY), {same:120}, 'reviewing stale History must not lower the watermark');
+        assert.equal(storage.writes.filter(write => write.key === SEEN_KEY).length, 1);
+        assert.deepEqual(clock.delays(), [1000, 10000]);
+        assert([...a.requests, ...b.requests].every(r => r.method === 'GET' && r.url.endsWith('/jobs')));
+        assert.equal(a.downloads.length + b.downloads.length, 0);
+    });
 
     test(`${lifecycle}: collapsed active observation resumes and reports a later failure`, async t => {
         const h=setup(t);await h.settle();const clock=queueClock(h);
