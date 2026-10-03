@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.6
+// @version      2.0.8
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.6';
+    const CORE_VERSION = '2.0.8';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -465,8 +465,7 @@
             const mode = loaderConfig.localOnly ? 'local' : 'library';
             ensureQueuePanel();
             queueMessage('Sending request…');
-            const ready = !queueLastSnapshot && loaderConfig.getHelperToken?.() ? wakeQueue() : Promise.resolve();
-            ready.then(() => queueAPI('/jobs', { urls: [media.url], mode })).then(() => {
+            queueAPI('/jobs', { urls: [media.url], mode }).then(() => {
                 recordSubmission(media);
                 setFeedback(icon, true);
                 queueMessage('Queued');
@@ -560,7 +559,6 @@
             return;
         }
 
-        const label = link.textContent.trim();
         const icon = existingIcon || document.createElement('button');
         if (!existingIcon) {
             icon.className = ICON_CLASS;
@@ -579,8 +577,6 @@
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
-        icon.title = 'Queue a local FLAC download with BeatportDL (Shift-click copies the URL)';
-        icon.setAttribute('aria-label', `Queue ${label} for local FLAC download; Shift-click copies its URL`);
         updateLabelParent(icon.parentElement);
         watchSubmission(media);
         refreshSubmissionIcon(icon);
@@ -626,18 +622,6 @@
             ...document.querySelectorAll('main h1'),
         ];
         return Array.from(new Set(headings)).find(isVisibleHeading) || null;
-    }
-
-    function itemDescription(media) {
-        const descriptions = {
-            artist: 'artist catalog',
-            chart: 'chart',
-            label: 'label catalog',
-            playlist: 'playlist',
-            release: 'full release',
-            track: 'track',
-        };
-        return descriptions[media.type] || media.type;
     }
 
     function disconnectTitleResizeObserver() {
@@ -735,9 +719,6 @@
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
-        const description = itemDescription(media);
-        icon.title = `Queue this ${description} for local FLAC download with BeatportDL`;
-        icon.setAttribute('aria-label', `Queue the ${description} ${heading.textContent.trim()} for local FLAC download`);
         if (titleChanged || !instance.resizeObserver) observeTitleSize(heading, parent);
         watchSubmission(media);
         refreshSubmissionIcon(icon);
@@ -782,22 +763,11 @@
                 continue;
             }
 
-            let hasRelevantRemoval = false;
-            for (const node of mutation.removedNodes) {
-                if (!isOwnedNode(node)) hasRelevantRemoval = true;
+            // The changed parent covers additions, removals, and eligibility
+            // changes such as artwork inserted into an already-enhanced link.
+            if ([...mutation.addedNodes, ...mutation.removedNodes].some(node => !isOwnedNode(node))) {
+                batcher.schedule(mutationRoot(mutation.target));
             }
-            if (hasRelevantRemoval) batcher.schedule(mutationRoot(mutation.target));
-            let hasRelevantAddition = false;
-            for (const node of mutation.addedNodes) {
-                if (!isOwnedNode(node)) {
-                    hasRelevantAddition = true;
-                    batcher.schedule(mutationRoot(node) || mutationRoot(mutation.target));
-                }
-            }
-            // Reconcile the changed parent too. For example, artwork inserted into an
-            // already-enhanced link makes that link ineligible even though the new image
-            // subtree contains no anchor of its own.
-            if (hasRelevantAddition) batcher.schedule(mutationRoot(mutation.target));
         }
     }
 
