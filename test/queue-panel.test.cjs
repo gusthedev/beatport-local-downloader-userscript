@@ -630,3 +630,23 @@ for (const lifecycle of ['visibility', 'bfcache']) {
         assert.equal(h.requests.length,before);assert.deepEqual(clock.delays(),[]);
     });
 }
+
+test('first submission checks helper health once when the initial snapshot is unavailable', async t => {
+    const h = setup(t);
+    await h.settle();
+    h.w.GM_xmlhttpRequest = request => request.onerror();
+    h.shadow.querySelector('[data-toggle]').click();
+    await h.settle();
+    h.w.GM_xmlhttpRequest = request => {
+        h.requests.push(request);
+        request.onload({ status: 200, responseText: JSON.stringify(
+            request.method === 'GET' && request.url.endsWith('/jobs') ? {jobs:[], active:false} : {accepted:true}
+        ) });
+    };
+    h.requests.length = 0;
+    h.w.document.querySelector('article button').click();
+    await h.settle();
+    assert.equal(h.requests.filter(r => r.url.endsWith('/health')).length, 1);
+    assert.equal(h.requests.filter(r => r.method === 'POST' && r.url.endsWith('/jobs')).length, 1);
+    assert.equal(h.downloads.length, 0);
+});
