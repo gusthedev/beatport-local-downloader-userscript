@@ -36,12 +36,14 @@ ${body}
 globalThis[Symbol.for('tm.beatportdl.local.instance')] = { version: '${version}' };`;
 }
 
-function runLoader({ storageValues = {}, response = null, requestFailure = '' } = {}) {
+function runLoader({ storageValues = {}, response = null, requestFailure = '', seed = '' } = {}) {
     const storage = new Map(Object.entries(storageValues));
     const requests = [];
     const menus = new Map();
     const alerts = [];
+    let syntaxChecks = 0;
     const context = {
+        Function: function (source) { syntaxChecks++; return new Function(source); },
         Date,
         Element: class {},
         HTMLAnchorElement: class {},
@@ -68,13 +70,25 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '' } 
         },
     };
     context.globalThis = context;
-    vm.runInNewContext(loaderSource, context, { filename: 'beatport-local-loader.user.js' });
-    return { alerts, context, menus, requests, storage };
+    vm.runInNewContext(seed ? loaderSource.replace("const INITIAL_HELPER_TOKEN = '';", `const INITIAL_HELPER_TOKEN = '${seed}';`) : loaderSource,
+        context, { filename: 'beatport-local-loader.user.js' });
+    return { alerts, context, menus, requests, storage, syntaxChecks: () => syntaxChecks };
 }
 
 test('loader metadata permits the GitHub Contents API', () => {
     assert.match(loaderSource, /^\/\/\s*@connect\s+api\.github\.com\s*$/m);
     assert.doesNotMatch(loaderSource, /^\/\/\s*@connect\s+raw\.githubusercontent\.com\s*$/m);
+});
+
+test('private installer seeds or repairs pairing while public updates preserve it', () => {
+    const key='beatportLoader.helperToken.v1', token='a'.repeat(64);
+    assert.equal(runLoader({seed:token}).storage.get(key),token);
+    assert.equal(runLoader({seed:token,storageValues:{[key]:'old-key'}}).storage.get(key),token);
+    const existing=runLoader({seed:token,storageValues:{[key]:'old-key',[STORAGE.localOnly]:true,'beatportLoader.confirmLargeJobs.v1':false}});
+    assert.equal(existing.storage.get(STORAGE.localOnly),true);
+    assert.equal(existing.storage.get('beatportLoader.confirmLargeJobs.v1'),false);
+    assert.equal(runLoader({storageValues:{[key]:token}}).storage.get(key),token);
+    assert.equal(runLoader().storage.has(key),false);
 });
 
 test('cold first install fetches current-branch raw source, caches, and starts the core once', () => {
@@ -266,4 +280,10 @@ test('a rejected update remains rejected after another page starts the restored 
     });
     assert.equal(second.storage.get(STORAGE.source), good);
     assert.equal(second.storage.get(STORAGE.rejected), rejected);
+});
+
+test('warm startup validates cached source only once', () => {
+    const h = runLoader({ storageValues: { [STORAGE.source]: core('9.0.0'), [STORAGE.lastAttempt]: Date.now() } });
+    assert.equal(h.syntaxChecks(), 1);
+    assert.equal(h.requests.length, 0);
 });
