@@ -79,3 +79,11 @@ The repository contains no Beatport username, password, pairing tokens, personal
 ## Development checks
 
 Run `npm ci` followed by `npm test` with Node.js 18 or newer. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
+
+Pull requests that change `beatport-local-hazel.user.js` must change its semantic `@version` relative to the PR base. Keep `CORE_VERSION` equal to `@version`. CI compares the tested PR merge result with its exact base, fetching only that base at depth one; dependency-only (including Dependabot), workflow-only, documentation-only, and loader-only changes do not require a core bump. Only bump a loader version when that loader changes.
+
+To run the same check locally with the base and candidate commits available locally (CI uses the PR merge commit as the candidate):
+
+```sh
+node scripts/check-shared-core-version.cjs <base-sha> <candidate-sha> beatport-local-hazel.user.js CORE_VERSION
+```
