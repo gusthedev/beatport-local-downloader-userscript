@@ -41,7 +41,9 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '', s
     const requests = [];
     const menus = new Map();
     const alerts = [];
+    let syntaxChecks = 0;
     const context = {
+        Function: function (source) { syntaxChecks++; return new Function(source); },
         Date,
         Element: class {},
         HTMLAnchorElement: class {},
@@ -70,7 +72,7 @@ function runLoader({ storageValues = {}, response = null, requestFailure = '', s
     context.globalThis = context;
     vm.runInNewContext(seed ? loaderSource.replace("const INITIAL_HELPER_TOKEN = '';", `const INITIAL_HELPER_TOKEN = '${seed}';`) : loaderSource,
         context, { filename: 'beatport-local-loader.user.js' });
-    return { alerts, context, menus, requests, storage };
+    return { alerts, context, menus, requests, storage, syntaxChecks: () => syntaxChecks };
 }
 
 test('loader metadata permits the GitHub Contents API', () => {
@@ -278,4 +280,10 @@ test('a rejected update remains rejected after another page starts the restored 
     });
     assert.equal(second.storage.get(STORAGE.source), good);
     assert.equal(second.storage.get(STORAGE.rejected), rejected);
+});
+
+test('warm startup validates cached source only once', () => {
+    const h = runLoader({ storageValues: { [STORAGE.source]: core('9.0.0'), [STORAGE.lastAttempt]: Date.now() } });
+    assert.equal(h.syntaxChecks(), 1);
+    assert.equal(h.requests.length, 0);
 });
