@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      1.9.2
+// @version      2.0.9
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '1.9.2';
+    const CORE_VERSION = '2.0.9';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -87,7 +87,11 @@
     const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const SUBMISSION_PREFIX = 'beatport.submitted.v1.';
-    const SUBMISSION_TTL = 24 * 60 * 60 * 1000;
+    const SUBMISSION_DAYS = 90;
+    const SUBMISSION_TTL = SUBMISSION_DAYS * 24 * 60 * 60 * 1000;
+    const SUBMISSION_CLEANUP_KEY = 'beatport.submissionCleanup.v1';
+    const SUBMISSION_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
+    let lastSubmissionCleanup = 0;
     const MODE_ID = 'tm-beatportdl-mode';
     const submissionMemory = new Map();
     const watchedSubmissions = new Map();
@@ -236,10 +240,16 @@
             icon.disabled = false;
             icon.textContent = when ? '✓' : '⇩';
         }
-        const action = when ? `Submitted ${new Date(when).toLocaleString()}; click to submit again`
-            : 'Request a local FLAC download';
+        // Link and page-title controls both follow the text they describe.
+        // Keep that context here so submission refreshes cannot overwrite it.
+        const name = icon.previousElementSibling?.textContent.trim() || media.id;
+        const description = media.type === 'artist' || media.type === 'label' ? `${media.type} catalog`
+            : media.type === 'release' ? 'full release' : media.type;
+        const download = `${description} ${name} for local FLAC download`;
+        const action = when ? `Submitted ${new Date(when).toLocaleString()}; queue ${download} again`
+            : `Queue ${download}`;
         icon.title = `${action} (Shift-click copies the URL)`;
-        icon.setAttribute('aria-label', `${action}: ${media.type} ${media.id}`);
+        icon.setAttribute('aria-label', icon.title);
     }
 
     function refreshSubmissionIcons() {
@@ -277,15 +287,23 @@
     }
 
     function pruneSubmissionStorage(now = Date.now()) {
-        if (typeof GM_listValues !== 'function' || typeof GM_deleteValue !== 'function') return;
+        if (typeof GM_listValues !== 'function' || typeof GM_deleteValue !== 'function'
+            || typeof GM_getValue !== 'function') return;
+        const last = Number(GM_getValue(SUBMISSION_CLEANUP_KEY, lastSubmissionCleanup)) || 0;
+        if (last > 0 && now >= last && now - last < SUBMISSION_CLEANUP_INTERVAL) return;
         for (const key of GM_listValues()) {
             if (!key.startsWith(SUBMISSION_PREFIX)) continue;
             const when = Number(GM_getValue(key, 0));
             if (!when || now - when >= SUBMISSION_TTL || when > now) GM_deleteValue(key);
         }
+        // Share the cleanup timestamp across tabs; visible markers still check
+        // their own exact expiry without enumerating all stored entries.
+        lastSubmissionCleanup = now;
+        if (typeof GM_setValue === 'function') GM_setValue(SUBMISSION_CLEANUP_KEY, now);
     }
 
     function reconcileModeControl() {
+        if (loaderConfig.helperEnabled) return;
         let button = document.getElementById(MODE_ID);
         if (typeof loaderConfig.setLocalOnly !== 'function') return;
         if (!button) {
@@ -373,7 +391,7 @@
 
     function handleMediaAction(event, media, icon) {
         if (event?.shiftKey) return copyMediaUrl(media, icon);
-        if (submissionTime(media) && !window.confirm('This item was submitted in the last 24 hours. Submit again?')) return false;
+        if (submissionTime(media) && !window.confirm(`This item was submitted in the last ${SUBMISSION_DAYS} days. Submit again?`)) return false;
         if (!confirmLargeJob(media)) return false;
         return createHazelJob(media, icon);
     }
@@ -448,6 +466,23 @@
 
     function createHazelJob(media, icon) {
         if (!media?.url || !icon || icon.disabled || !claimJob(media)) return false;
+        if (loaderConfig.helperEnabled) {
+            icon.disabled = true;
+            const mode = loaderConfig.localOnly ? 'local' : 'library';
+            ensureQueuePanel();
+            queueMessage('Sending request…');
+            queueAPI('/jobs', { urls: [media.url], mode }).then(() => {
+                recordSubmission(media);
+                setFeedback(icon, true);
+                queueMessage('Queued');
+                pollQueue();
+            }).catch(error => {
+                instance.recentJobs.delete(mediaKey(media));
+                setFeedback(icon, false);
+                queueMessage(error.message, true);
+            });
+            return true;
+        }
 
         let download = null;
         let objectUrl = '';
@@ -530,7 +565,6 @@
             return;
         }
 
-        const label = link.textContent.trim();
         const icon = existingIcon || document.createElement('button');
         if (!existingIcon) {
             icon.className = ICON_CLASS;
@@ -549,8 +583,6 @@
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
-        icon.title = 'Queue a local FLAC download with BeatportDL (Shift-click copies the URL)';
-        icon.setAttribute('aria-label', `Queue ${label} for local FLAC download; Shift-click copies its URL`);
         updateLabelParent(icon.parentElement);
         watchSubmission(media);
         refreshSubmissionIcon(icon);
@@ -596,18 +628,6 @@
             ...document.querySelectorAll('main h1'),
         ];
         return Array.from(new Set(headings)).find(isVisibleHeading) || null;
-    }
-
-    function itemDescription(media) {
-        const descriptions = {
-            artist: 'artist catalog',
-            chart: 'chart',
-            label: 'label catalog',
-            playlist: 'playlist',
-            release: 'full release',
-            track: 'track',
-        };
-        return descriptions[media.type] || media.type;
     }
 
     function disconnectTitleResizeObserver() {
@@ -705,9 +725,6 @@
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
-        const description = itemDescription(media);
-        icon.title = `Queue this ${description} for local FLAC download with BeatportDL`;
-        icon.setAttribute('aria-label', `Queue the ${description} ${heading.textContent.trim()} for local FLAC download`);
         if (titleChanged || !instance.resizeObserver) observeTitleSize(heading, parent);
         watchSubmission(media);
         refreshSubmissionIcon(icon);
@@ -752,22 +769,11 @@
                 continue;
             }
 
-            let hasRelevantRemoval = false;
-            for (const node of mutation.removedNodes) {
-                if (!isOwnedNode(node)) hasRelevantRemoval = true;
+            // The changed parent covers additions, removals, and eligibility
+            // changes such as artwork inserted into an already-enhanced link.
+            if ([...mutation.addedNodes, ...mutation.removedNodes].some(node => !isOwnedNode(node))) {
+                batcher.schedule(mutationRoot(mutation.target));
             }
-            if (hasRelevantRemoval) batcher.schedule(mutationRoot(mutation.target));
-            let hasRelevantAddition = false;
-            for (const node of mutation.addedNodes) {
-                if (!isOwnedNode(node)) {
-                    hasRelevantAddition = true;
-                    batcher.schedule(mutationRoot(node) || mutationRoot(mutation.target));
-                }
-            }
-            // Reconcile the changed parent too. For example, artwork inserted into an
-            // already-enhanced link makes that link ineligible even though the new image
-            // subtree contains no anchor of its own.
-            if (hasRelevantAddition) batcher.schedule(mutationRoot(mutation.target));
         }
     }
 
@@ -846,12 +852,432 @@
         document.documentElement.appendChild(style);
     }
 
+    const HELPER_URL = 'http://127.0.0.1:17854';
+    let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
+    let queueLastSnapshot = null;
+    let queuePageHidden = false;
+    let pairingRequestedAt = 0;
+    let queueSleepAt = 0, queueSleepTimer = 0;
+
+    function updateHelperCountdown() {
+        window.clearTimeout(queueSleepTimer);
+        if (!queuePanel) return;
+        const label = queuePanel.querySelector('[data-sleep]');
+        label.hidden = !queueLastSnapshot || (!queueLastSnapshot.active && !queueSleepAt);
+        if (queueLastSnapshot?.active) { label.textContent = 'Helper stays awake while working.'; return; }
+        if (!queueSleepAt || !queueLastSnapshot) return;
+        const seconds = Math.max(0, Math.ceil((queueSleepAt - performance.now()) / 1000));
+        label.textContent = `Helper sleeps in ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+        if (queuePanel.querySelector('[data-panel]').hidden || document.hidden || queuePageHidden) return;
+        if (seconds > 0) queueSleepTimer = window.setTimeout(updateHelperCountdown, 1000);
+        else {
+            label.textContent = 'Helper is going to sleep.';
+            if (queueLastSnapshot.idle_remaining > 0) pollQueue();
+        }
+    }
+    const QUEUE_ERROR_SEEN_KEY = 'beatportLoader.queueErrorsSeen.v1';
+    const QUEUE_ERROR_START_KEY = 'beatportLoader.queueErrorAlertsSince.v1';
+    let queueErrorsSeen = {};
+    let queueErrorAlertsSince = Date.now() / 1000;
+    try {
+        if (typeof GM_getValue === 'function') queueErrorAlertsSince = Number(GM_getValue(QUEUE_ERROR_START_KEY, 0)) || queueErrorAlertsSince;
+        if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_START_KEY, queueErrorAlertsSince);
+        const saved = typeof GM_getValue === 'function' ? GM_getValue(QUEUE_ERROR_SEEN_KEY, {}) : {};
+        queueErrorsSeen = mergeQueueErrorsSeen(saved);
+    } catch {}
+
+    function mergeQueueErrorsSeen(...records) {
+        const merged = Object.create(null);
+        for (const record of records) {
+            if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+            for (const [id, stamp] of Object.entries(record)) {
+                if (typeof stamp === 'number' && Number.isFinite(stamp) && stamp > 0) {
+                    merged[id] = Math.max(merged[id] || 0, stamp);
+                }
+            }
+        }
+        // Deterministic pruning also makes simultaneous capped writes converge.
+        return Object.fromEntries(Object.entries(merged)
+            .sort((a,b) => b[1]-a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0,200));
+    }
+
+    function syncQueueErrorsSeen(...records) {
+        let saved = {};
+        try { if (typeof GM_getValue === 'function') saved = GM_getValue(QUEUE_ERROR_SEEN_KEY, {}); } catch {}
+        queueErrorsSeen = mergeQueueErrorsSeen(queueErrorsSeen, saved, ...records);
+        const entries = Object.entries(queueErrorsSeen);
+        const same = saved && typeof saved === 'object' && !Array.isArray(saved)
+            && Object.keys(saved).length === entries.length && entries.every(([id, stamp]) => saved[id] === stamp);
+        // Read/merge before writing, then repair overlapping writes via the
+        // listener below. GM storage has no atomic read/modify/write operation.
+        if (!same) {
+            try { if (typeof GM_setValue === 'function') GM_setValue(QUEUE_ERROR_SEEN_KEY, queueErrorsSeen); } catch {}
+        }
+    }
+
+    function updateQueueAttention() {
+        if (!queuePanel || !queueLastSnapshot) return;
+        const open = !queuePanel.querySelector('[data-panel]').hidden;
+        const historyOpen = queuePanel.querySelector('[data-history]').open;
+        const errors = (queueLastSnapshot.jobs || []).filter(job =>
+            Number(job.updated) >= queueErrorAlertsSince && (job.state === 'failed' || job.state === 'waiting_venus' && job.error));
+        const reviewed = Object.create(null);
+        for (const job of errors) {
+            const stamp = Number(job.updated) || 1;
+            if (open && (job.state !== 'failed' || historyOpen)) {
+                reviewed[job.id] = Math.max(reviewed[job.id] || 0, stamp);
+            }
+        }
+        syncQueueErrorsSeen(reviewed);
+        // A stale snapshot must not regress a newer acknowledgment. A later
+        // failure of the same job still needs review when its timestamp advances.
+        const unseen = errors.filter(job => !(queueErrorsSeen[job.id] >= (Number(job.updated) || 1))).length;
+        const button = queuePanel.querySelector('[data-toggle]');
+        button.classList.toggle('needs-attention', !open && unseen > 0);
+        const current = queueLastSnapshot.current_count ?? (queueLastSnapshot.jobs || []).filter(job => ['queued','downloading','processing','waiting_venus'].includes(job.state)).length;
+        button.textContent = unseen ? `Downloads · ${unseen} to check` : 'Downloads' + (current ? ' · ' + current : '');
+        button.title = unseen ? 'A download needs attention. Open the panel and History to review.' : 'Open download queue';
+    }
+
+    function pairingStatus(state) {
+        if (!queuePanel) return;
+        const labels = { connected:'Connected to local helper', saved:'Pairing saved · helper asleep or unavailable',
+            missing:'This browser needs one-time setup', rejected:'Pairing needs repair · pair this browser again' };
+        queuePanel.querySelector('[data-pairing-status]').textContent = labels[state];
+        queuePanel.querySelector('[data-auto-pair]').hidden = state === 'connected' || state === 'saved';
+    }
+
+    function downloadWakeFile(name) {
+        const link = document.createElement('a');
+        const objectURL = URL.createObjectURL(new Blob(['Wake Beatport Queue\n'], { type:'text/plain' }));
+        link.href = objectURL; link.download = name; link.style.display = 'none';
+        document.documentElement.appendChild(link); link.click(); link.remove();
+        scheduleObjectUrlCleanup(objectURL);
+    }
+
+    function requestBrowserPairing() {
+        if (Date.now() - pairingRequestedAt < 10000) return;
+        const agent = navigator.userAgent || '';
+        const browser = /Chrome\//.test(agent) && !/Edg|OPR/.test(agent) ? 'chrome'
+            : /Version\/.*Safari\//.test(agent) ? 'safari' : 'default';
+        try {
+            downloadWakeFile('beatportdl-wake-pair-' + browser + '-' + Date.now() + '.txt');
+            pairingRequestedAt = Date.now();
+            queueMessage('Opening the private installer through Hazel. Approve Update in Tampermonkey, then reload Beatport. If it says Reinstall or warns about resetting settings, cancel. No code to copy.');
+        } catch {
+            queueMessage('Could not request setup. Run Install Beatport Loader.command from your local BeatportDL folder.', true);
+        }
+    }
+
+    function helperRequest(path, data) {
+        const token = loaderConfig.getHelperToken?.() || '';
+        if (!token) {
+            pairingStatus('missing');
+            return Promise.reject(new Error('Click Pair this browser for automatic setup.'));
+        }
+        return new Promise((resolve, reject) => GM_xmlhttpRequest({
+            method: data === undefined ? 'GET' : 'POST', url: HELPER_URL + path,
+            headers: { Authorization: 'Bearer ' + token, ...(data === undefined ? {} : { 'Content-Type': 'application/json' }) },
+            ...(data === undefined ? {} : { data: JSON.stringify(data) }), timeout: 6000,
+            onload(response) {
+                try {
+                    const value = JSON.parse(response.responseText);
+                    if (response.status === 403 && (!value.code || value.code === 'pairing_required')) pairingStatus('rejected');
+                    if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
+                    pairingStatus('connected');
+                    resolve(value);
+                } catch (error) { reject(error); }
+            },
+            onerror() { pairingStatus('saved'); reject(new Error('Helper asleep or unavailable. Use Start / reconnect.')); },
+            ontimeout() { pairingStatus('saved'); reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
+        }));
+    }
+
+    function wakeQueue() {
+        if (queueWaking) return queueWaking;
+        queueWaking = (async () => {
+            if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); throw new Error('Click Pair this browser for automatic setup.'); }
+            try { await helperRequest('/health'); return; } catch (error) {
+                if (/pairing|refused/i.test(error.message)) throw error;
+            }
+            // One transient wake file when asleep, never a per-track job file.
+            downloadWakeFile('beatportdl-wake-' + Date.now() + '.txt');
+            queueMessage('Starting local helper through Hazel…');
+            for (let attempt = 0; attempt < 15; attempt++) {
+                await new Promise(resolve => window.setTimeout(resolve, 1000));
+                try { await helperRequest('/health'); return; } catch {}
+            }
+            throw new Error('Hazel did not start the helper. Check its Beatport rule and Downloads folder.');
+        })().finally(() => { queueWaking = null; });
+        return queueWaking;
+    }
+
+    async function queueAPI(path, data) {
+        // Never silently fall back to a TXT job: a response may have been lost
+        // after acceptance. Database dedup makes an explicit retry safe.
+        await wakeQueue();
+        return helperRequest(path, data);
+    }
+
+    function queueMessage(message, error = false) {
+        if (!queuePanel) return;
+        queuePanel.querySelector('[data-message]').textContent = message;
+        queuePanel.querySelector('[data-toggle]').textContent = error ? 'Downloads !' : message === 'Queued' ? 'Downloads · queued' : 'Downloads';
+        queuePanel.querySelector('[data-message]').style.color = error ? '#ffb5a8' : '';
+    }
+
+    function setQueueOpen(open) {
+        if (!queuePanel) return;
+        queuePanel.querySelector('[data-panel]').hidden = !open;
+        queuePanel.querySelector('[data-toggle]').setAttribute('aria-expanded', String(open));
+        updateQueueAttention();
+        updateHelperCountdown();
+        if (open) pollQueue();
+    }
+
+    function renderQueue(snapshot) {
+        queueLastSnapshot = snapshot;
+        queueSleepAt = typeof snapshot.idle_remaining === 'number' ? performance.now() + snapshot.idle_remaining * 1000 : 0;
+        updateHelperCountdown();
+        const jobs = snapshot.jobs || [];
+        const current = jobs.filter(job => ['queued', 'downloading', 'processing', 'waiting_venus'].includes(job.state));
+        const history = jobs.filter(job => ['completed', 'failed', 'cancelled'].includes(job.state));
+        const active = snapshot.current_count ?? current.length;
+        // Historical failures belong in history, not a permanent new-error badge.
+        queuePanel.querySelector('[data-toggle]').textContent = 'Downloads' + (active ? ' · ' + active : '');
+        queuePanel.querySelector('[data-venus]').hidden = !!snapshot.venus;
+        const venusButton = queuePanel.querySelector('[data-connect]');
+        venusButton.textContent = snapshot.venus ? 'Venus Connected' : 'Venus Disconnected';
+        venusButton.disabled = !!snapshot.venus;
+        venusButton.style.color = snapshot.venus ? '#a6f3c8' : '';
+        venusButton.title = snapshot.venus ? 'Venus is already connected.' : 'Click to connect to Venus.';
+        queuePanel.querySelector('[data-pause]').textContent = snapshot.paused ? 'Resume queue' : 'Pause after current job';
+        const note = snapshot.venus && snapshot.note === 'Venus connected' ? '' : snapshot.note;
+        queuePanel.querySelector('[data-message]').textContent = snapshot.paused ? 'Queue saved and paused.'
+            : note || (snapshot.active ? 'Working · safe to close this page.' : 'No active work · helper will exit automatically.');
+        queuePanel.querySelector('[data-message]').style.color = '';
+        const list = queuePanel.querySelector('[data-jobs]');
+        const historyList = queuePanel.querySelector('[data-history-jobs]');
+        list.replaceChildren();
+        historyList.replaceChildren();
+        const count = snapshot.history_count ?? history.length;
+        queuePanel.querySelector('[data-history-title]').textContent = 'History' + (count ? ` · latest ${Math.min(10, history.length)} of ${count}` : ' · empty');
+        queuePanel.querySelector('[data-clear-completed]').hidden = !(snapshot.completed_history_count ?? history.filter(job => job.state !== 'failed').length);
+        queuePanel.querySelector('[data-clear-failed]').hidden = !(snapshot.failed_history_count ?? history.filter(job => job.state === 'failed').length);
+        const retryAll = queuePanel.querySelector('[data-retry-failed]');
+        retryAll.hidden = !(snapshot.retryable_count > 0);
+        retryAll.textContent = `Retry failed jobs (${snapshot.retryable_count || 0})`;
+        for (const job of [...current, ...history.slice(0, 10)]) {
+            const row = document.createElement('article');
+            const title = document.createElement('strong'); title.textContent = job.title;
+            const mode = document.createElement('small');
+            mode.hidden = job.state === 'completed';
+            mode.textContent = job.local_exception ? 'Local exception · no Venus or Music import'
+                : job.mode === 'local' ? 'Local only' : 'Venus library';
+            const state = document.createElement('div');
+            const delivery = job.mode === 'local' || job.local_exception ? 'locally' : 'to Venus';
+            const fileCount = `${job.complete}/${job.files} ${job.files === 1 ? 'file' : 'files'} delivered ${delivery}`;
+            state.textContent = job.state === 'completed' && job.files > 0 && job.label !== 'Duplicate' ? fileCount : job.label;
+            const detail = document.createElement('small');
+            detail.textContent = job.error || job.detail || (job.files > 1 && job.state !== 'completed' ? fileCount : '');
+            detail.hidden = !detail.textContent;
+            row.append(title, mode, state, detail);
+            const isHistory = ['completed','failed','cancelled'].includes(job.state);
+            if (isHistory && job.updated) {
+                const date = document.createElement('small'); date.textContent = new Date(job.updated * 1000).toLocaleString(); row.append(date);
+            }
+            if (job.state === 'failed' || job.state === 'waiting_venus' && job.error) {
+                const retry = document.createElement('button'); retry.textContent = job.state === 'waiting_venus' ? 'Retry transfer' : 'Retry this job';
+                retry.addEventListener('click', () => panelAction('/retry', { id: job.id }));
+                row.append(retry);
+            }
+            (isHistory ? historyList : list).append(row);
+        }
+        if (!current.length) list.textContent = 'No current downloads.';
+        else if (active > current.length) {
+            const more = document.createElement('small'); more.textContent = `Showing ${current.length} of ${active} current jobs.`; list.append(more);
+        }
+        if (!history.length) historyList.textContent = 'No visible history.';
+        updateQueueAttention();
+    }
+
+    function queueHasActiveWork() {
+        return queueLastSnapshot && (queueLastSnapshot.active ||
+            !queueLastSnapshot.paused && queueLastSnapshot.jobs.some(job => ['queued','downloading','processing'].includes(job.state)));
+    }
+
+    function suspendQueuePolling() {
+        window.clearTimeout(queuePollTimer);
+        window.clearTimeout(queueSleepTimer);
+    }
+
+    function resumeQueuePolling() {
+        if (!queuePanel || document.hidden || queuePageHidden) return;
+        // A collapsed queue still observes active work for new failures. An
+        // idle collapsed queue must not start a permanent polling loop.
+        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork()) pollQueue();
+    }
+
+    async function pollQueue() {
+        window.clearTimeout(queuePollTimer);
+        if (queuePolling || !queuePanel || document.hidden || queuePageHidden) return;
+        queuePolling = true;
+        try {
+            const snapshot = await helperRequest('/jobs');
+            renderQueue(snapshot);
+        } catch (error) {
+            queueLastSnapshot = null;
+            queueSleepAt = 0;
+            window.clearTimeout(queueSleepTimer);
+            queuePanel.querySelector('[data-sleep]').textContent = 'Helper asleep or unavailable.';
+            queueMessage(error.message);
+        } finally {
+            queuePolling = false;
+            if (!document.hidden && !queuePageHidden && queueHasActiveWork()) queuePollTimer = window.setTimeout(pollQueue, 1500);
+            else if (queueLastSnapshot?.idle_remaining > 0 && !queuePanel.querySelector('[data-panel]').hidden && !document.hidden && !queuePageHidden) {
+                // Read the real deadline periodically: another tab may have
+                // extended it. GET never keeps the helper awake.
+                queuePollTimer = window.setTimeout(pollQueue, Math.min(10000, queueLastSnapshot.idle_remaining * 1000 + 250));
+            }
+        }
+    }
+
+    async function panelAction(path, data = {}) {
+        try { await queueAPI(path, data); await pollQueue(); }
+        catch (error) { queueMessage(error.message, true); }
+    }
+
+    function ensureQueuePanel() {
+        if (queuePanel) return;
+        queueHost = document.createElement('div');
+        queueHost.id = 'tm-beatportdl-queue';
+        queueHost.setAttribute(OWNED_ATTRIBUTE, 'queue');
+        // Only the compact tab/panel intercepts clicks; there is no backdrop.
+        queueHost.style.cssText = 'position:fixed;top:88px;right:8px;z-index:2147483645;pointer-events:none;';
+        queuePanel = queueHost.attachShadow({ mode: 'closed' });
+        queuePanel.innerHTML = `
+          <style>
+            :host { all:initial; }
+            * { box-sizing:border-box; } [hidden] { display:none!important; }
+            button,input,textarea,select { font:inherit; }
+            button,select { color:#f0f7f3;background:#26352e;border:1px solid #526258;border-radius:6px;padding:7px 9px;cursor:pointer; }
+            button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid #01ff95;outline-offset:2px; }
+            [data-toggle] { pointer-events:auto;display:block;margin-left:auto;font:12px system-ui;padding:7px 9px; }
+            [data-toggle].needs-attention { background:#8b2424;border-color:#ff8989;color:#fff; }
+            section { pointer-events:auto;width:min(350px,calc(100vw - 24px));max-height:max(90px,calc(100dvh - 250px));overflow:auto;
+              padding:14px;margin-top:6px;border:1px solid #41534a;border-radius:10px;background:#142019;color:#eff7f2;font:13px/1.4 system-ui;box-shadow:0 6px 20px #0005; }
+            header,.actions { display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px; }
+            [data-connect]:disabled { cursor:default; }
+            header strong { flex:1; } label,small { display:block; } small { color:#b9cbbf;overflow-wrap:anywhere; }
+            select,input,textarea { max-width:100%;width:100%;margin:5px 0 9px; }
+            input,textarea { background:#0e1712;color:#f0f7f3;border:1px solid #526258;border-radius:4px;padding:7px; }
+            article { border-top:1px solid #36493d;padding:10px 0;overflow-wrap:anywhere; } article strong { font-weight:600; }
+            [data-message] { margin:8px 0; } details { margin-top:10px; } summary { cursor:pointer; }
+            @media(pointer:coarse) { button,select { min-height:44px; } }
+          </style>
+          <button type="button" data-toggle aria-expanded="false">Downloads</button>
+          <section data-panel hidden aria-label="Beatport download queue">
+            <header><strong>Beatport downloads</strong><button type="button" data-side aria-label="Move panel to other side">⇄</button><button type="button" data-close>Collapse</button></header>
+            <label>New downloads<select data-mode><option value="library">Venus library</option><option value="local">Local only</option></select></label>
+            <small data-venus hidden>Connecting requires home Wi-Fi.</small>
+            <small data-pairing-status></small>
+            <button type="button" data-auto-pair>Pair this browser</button>
+            <div data-message role="status" aria-live="polite">Start the helper to see your saved queue.</div>
+            <small data-sleep hidden></small>
+            <div class="actions"><button type="button" data-wake>Start / reconnect</button><button type="button" data-pause>Pause after current job</button><button type="button" data-connect disabled>Venus · not checked</button><button type="button" data-retry-failed hidden>Retry failed jobs</button></div>
+            <div data-jobs></div>
+            <details data-history><summary data-history-title>History</summary>
+              <div class="actions"><button type="button" data-clear-completed hidden>Clear completed</button><button type="button" data-clear-failed hidden>Clear failed</button></div>
+              <small>Only the 10 latest entries are shown. Clearing hides finished and failed jobs; files and the retry log stay untouched.</small>
+              <div data-history-jobs></div>
+            </details>
+            <details><summary>Add a list of links</summary><label>One Beatport URL per line<textarea data-links rows="4"></textarea></label><button type="button" data-add>Queue list</button></details>
+            <details data-pair><summary>Advanced connection settings</summary><button type="button" data-repair-pair>Pair this browser again</button>
+              <small>Automatic setup opens your private local installer. Manual code entry is only a fallback.</small>
+              <label>Private pairing code<input data-token type="password" autocomplete="off" spellcheck="false"></label><button type="button" data-save>Save pairing</button></details>
+          </section>`;
+        const find = selector => queuePanel.querySelector(selector);
+        pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
+        find('[data-history]').addEventListener('toggle', updateQueueAttention);
+        try {
+            if (typeof GM_addValueChangeListener === 'function') {
+                GM_addValueChangeListener(QUEUE_ERROR_SEEN_KEY, (_key, oldValue, newValue, remote) => {
+                    if (!remote) return; // Our local state already includes this write.
+                    // Include the overwritten value and read current storage too:
+                    // notifications may arrive after another tab has written again.
+                    syncQueueErrorsSeen(oldValue, newValue);
+                    updateQueueAttention(); // Repaint cached status; never wake/poll the helper.
+                });
+            }
+        } catch {}
+        find('[data-retry-failed]').addEventListener('click', () => {
+            const count = queueLastSnapshot?.retryable_count || 0;
+            if (count && window.confirm(`Retry ${count} failed job(s), including older failures in saved history? Each keeps its original destination and resumes from its saved stage. Finished files will not be downloaded again.`)) panelAction('/retry-failed');
+        });
+        find('[data-auto-pair]').addEventListener('click', requestBrowserPairing);
+        find('[data-repair-pair]').addEventListener('click', requestBrowserPairing);
+        for (const kind of ['completed','failed']) find(`[data-clear-${kind}]`).addEventListener('click', () => {
+            if (window.confirm(`Clear ${kind} entries from history? Downloaded files, saved jobs and the retry log will be kept. Unfinished transfers stay visible.`)) panelAction(`/history/clear-${kind}`);
+        });
+        find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library';
+        find('[data-mode]').addEventListener('change', event => loaderConfig.setLocalOnly(event.target.value === 'local'));
+        loaderConfig.onModeChange?.(() => { find('[data-mode]').value = loaderConfig.localOnly ? 'local' : 'library'; });
+        find('[data-toggle]').addEventListener('click', () => setQueueOpen(find('[data-panel]').hidden));
+        find('[data-close]').addEventListener('click', () => setQueueOpen(false));
+        find('[data-side]').addEventListener('click', () => {
+            const left = queueHost.style.right !== 'auto';
+            queueHost.style.right = left ? 'auto' : '8px'; queueHost.style.left = left ? '8px' : 'auto';
+        });
+        find('[data-wake]').addEventListener('click', () => {
+            if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); queueMessage('Click Pair this browser for automatic setup.', true); return; }
+            wakeQueue().then(() => helperRequest('/resume', {})).then(pollQueue).catch(error => queueMessage(error.message, true));
+        });
+        find('[data-save]').addEventListener('click', () => {
+            const token = find('[data-token]').value.trim();
+            if (!/^[a-f0-9]{64}$/.test(token)) return queueMessage('Enter the 64-character private pairing code.', true);
+            loaderConfig.setHelperToken(token); find('[data-token]').value = ''; find('[data-pair]').open = false;
+            pairingStatus('saved');
+            queueMessage('Paired. Click Start / reconnect.');
+        });
+        find('[data-pause]').addEventListener('click', () => panelAction(queueLastSnapshot?.paused ? '/resume' : '/pause'));
+        find('[data-connect]').addEventListener('click', () => panelAction('/connect'));
+        find('[data-add]').addEventListener('click', () => {
+            const urls = find('[data-links]').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+            if (!urls.length) return queueMessage('Paste at least one Beatport link.', true);
+            queueAPI('/jobs', { urls, mode: loaderConfig.localOnly ? 'local' : 'library' }).then(() => {
+                find('[data-links]').value = ''; queueMessage('List queued'); pollQueue();
+            }).catch(error => queueMessage(error.message, true));
+        });
+        // Typing in our controls must not trigger Beatport's keyboard player shortcuts.
+        queuePanel.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); event.stopPropagation(); });
+        window.addEventListener('pointerdown', event => { if (!event.composedPath().includes(queueHost)) setQueueOpen(false); }, { passive:true });
+        window.addEventListener('keydown', event => { if (event.key === 'Escape') setQueueOpen(false); });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) suspendQueuePolling();
+            else resumeQueuePolling();
+        });
+        window.addEventListener('pagehide', () => {
+            queuePageHidden = true;
+            suspendQueuePolling();
+        }, { passive: true });
+        window.addEventListener('pageshow', event => {
+            queuePageHidden = false;
+            if (event.persisted) resumeQueuePolling();
+        }, { passive: true });
+        document.documentElement.appendChild(queueHost);
+        instance.showQueue = () => setQueueOpen(true);
+        // Discover an already-awake helper without launching anything. This
+        // avoids app prompts just because a new Beatport page was opened.
+        if (loaderConfig.getHelperToken?.()) helperRequest('/jobs').then(renderQueue).catch(() => {});
+    }
+
     function start() {
         if (instance.started) return;
         instance.started = true;
         addIconStyles();
         pruneSubmissionStorage();
         reconcileModeControl();
+        if (loaderConfig.helperEnabled) ensureQueuePanel();
         loaderConfig.onModeChange?.(reconcileModeControl);
         window.addEventListener('focus', refreshSubmissionIcons);
         document.addEventListener('visibilitychange', () => {
