@@ -8,7 +8,7 @@ The panel starts collapsed near the top edge, away from the player. It can move 
 
 Current downloads remain in the main view. Finished and failed jobs appear in collapsed History, with only the latest 10 rendered and dated. **Clear completed** and **Clear failed** independently hide those entries without deleting audio, saved jobs, or retry logs. Pending transfers are never hidden. **Retry failed jobs** confirms the total, including older failures, before resuming saved stages; individual failed transfers also have **Retry transfer**.
 
-Core 2.0.8 turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
+Core 2.0.9 turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
 The updated helper stays available for three idle minutes, then exits completely. The panel shows the helper's actual remaining minutes/seconds, with a lightweight status refresh while visible to account for activity in other tabs. Status reads never extend the idle deadline. Work in progress keeps the helper awake. **Start / reconnect** resumes pending work, but does not automatically retry failed downloads.
 
@@ -26,6 +26,7 @@ The existing TXT batch/retry workflow remains supported by the local queue. Brow
 
 - Adds local-download actions beside eligible track, release, playlist, chart, label, and artist links.
 - Adds one page-title action for each supported Beatport media page, including library playlists.
+- Describes each download action in its tooltip and accessible name, including the link or page title, media scope, local FLAC download, and Shift-click copy shortcut.
 - Reconciles controls during Beatport single-page navigation without repeatedly rescanning the entire document.
 - Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
 - Deduplicates repeated links within the same list row and supports Shift-click to copy a canonical Beatport URL.
@@ -42,7 +43,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.8** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.9** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -57,7 +58,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.8**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.9**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 ### Safari 27 playback
 
