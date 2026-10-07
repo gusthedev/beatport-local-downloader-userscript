@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.8
+// @version      2.0.9
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.8';
+    const CORE_VERSION = '2.0.9';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -240,10 +240,16 @@
             icon.disabled = false;
             icon.textContent = when ? '✓' : '⇩';
         }
-        const action = when ? `Submitted ${new Date(when).toLocaleString()}; click to submit again`
-            : 'Request a local FLAC download';
+        // Link and page-title controls both follow the text they describe.
+        // Keep that context here so submission refreshes cannot overwrite it.
+        const name = icon.previousElementSibling?.textContent.trim() || media.id;
+        const description = media.type === 'artist' || media.type === 'label' ? `${media.type} catalog`
+            : media.type === 'release' ? 'full release' : media.type;
+        const download = `${description} ${name} for local FLAC download`;
+        const action = when ? `Submitted ${new Date(when).toLocaleString()}; queue ${download} again`
+            : `Queue ${download}`;
         icon.title = `${action} (Shift-click copies the URL)`;
-        icon.setAttribute('aria-label', `${action}: ${media.type} ${media.id}`);
+        icon.setAttribute('aria-label', icon.title);
     }
 
     function refreshSubmissionIcons() {

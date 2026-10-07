@@ -4,8 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'beatport-local-hazel.user.js'), 'utf8');
-function setup(t, storage = new Map(), legacy = false) {
- const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/test/123">Track title</a><a href="/track/test/123">Short</a></article></main><div id="clock">0</div>', {url:'https://www.beatport.com/track/test/123',runScripts:'outside-only',pretendToBeVisual:true});
+function setup(t, storage = new Map(), legacy = false, {
+ html = '<main><h1>Track</h1><article><a href="/track/test/123">Track title</a><a href="/track/test/123">Short</a></article></main><div id="clock">0</div>',
+ url = 'https://www.beatport.com/track/test/123',
+} = {}) {
+ const dom = new JSDOM(html, {url,runScripts:'outside-only',pretendToBeVisual:true});
  const w = dom.window, frames=[], listeners=new Map(); let sequence=0, local=false, modeListener, storageScans=0;
  w.Range.prototype.getClientRects=()=>[];
  w.requestAnimationFrame=fn => {frames.push(fn);return frames.length;};
@@ -19,6 +22,86 @@ function setup(t, storage = new Map(), legacy = false) {
  t.after(()=>{hooks.instance.observer.disconnect();w.close();});
  return {w,hooks,listeners,storage,get storageScans(){return storageScans;}, async settle(){for(let i=0;i<12;i++){await Promise.resolve();frames.splice(0).forEach(fn=>fn());}assert.equal(frames.length,0);}};
 }
+
+function assertDownloadLabels(button, description, name) {
+ assert.ok(button, 'download control exists');
+ for (const attribute of ['title', 'aria-label']) {
+  const label = button.getAttribute(attribute);
+  assert.ok(label, `${attribute} is present`);
+  assert.match(label, /queue|request/i, `${attribute} describes the action`);
+  assert.match(label, /local FLAC download/, `${attribute} describes the format and destination`);
+  assert.ok(label.includes(name), `${attribute} identifies the linked item or page`);
+  assert.ok(label.includes(description), `${attribute} describes the media scope`);
+  assert.match(label, /Shift-click copies.*URL/, `${attribute} explains the alternate action`);
+ }
+}
+
+for (const [type, pathname, description] of [
+ ['track', '/track/test/123', 'track'],
+ ['release', '/release/test/123', 'full release'],
+ ['playlist', '/playlist/test/123', 'playlist'],
+ ['chart', '/chart/test/123', 'chart'],
+ ['artist', '/artist/test/123', 'artist catalog'],
+ ['label', '/label/test/123', 'label catalog'],
+ ['playlist', '/library/playlists/123', 'playlist'],
+]) {
+ test(`download labels describe link and page context for ${pathname}`, async t => {
+  const h = setup(t, new Map(), false, {
+   html: `<main><h1>Page <span>collection</span></h1><article><a href="${pathname}">Linked <span>selection</span></a></article></main>`,
+   url: `https://www.beatport.com${pathname}`,
+  });
+  await h.settle();
+  const buttons = [
+   [h.w.document.querySelector('article button'), 'Linked selection'],
+   [h.w.document.querySelector('h1 + button'), 'Page collection'],
+  ];
+  for (const [button, name] of buttons) {
+   assert.equal(button.textContent, '⇩');
+   assertDownloadLabels(button, description, name);
+  }
+
+  // Cross-tab submission updates must retain the item context in both labels.
+  h.w.GM_setValue(`beatport.submitted.v1.${type}:123`, Date.now());
+  await h.settle();
+  for (const [button, name] of buttons) {
+   assert.equal(button.textContent, '✓');
+   assertDownloadLabels(button, description, name);
+   for (const attribute of ['title', 'aria-label']) assert.match(button.getAttribute(attribute), /Submitted .*again/);
+  }
+
+  // Expiry/focus refresh restores the download action without losing its name.
+  h.storage.set(`beatport.submitted.v1.${type}:123`, Date.now() - 90 * 86400000 - 1);
+  h.w.dispatchEvent(new h.w.Event('focus'));
+  await h.settle();
+  for (const [button, name] of buttons) {
+   assert.equal(button.textContent, '⇩');
+   assertDownloadLabels(button, description, name);
+   for (const attribute of ['title', 'aria-label']) assert.doesNotMatch(button.getAttribute(attribute), /Submitted/);
+  }
+ });
+}
+
+test('download labels follow changed link text, hrefs, and page titles during navigation', async t => {
+ const h = setup(t);
+ await h.settle();
+ const link = h.w.document.querySelector('article a');
+ const linkButton = link.nextElementSibling;
+ link.textContent = 'Renamed track';
+ h.w.document.querySelector('h1').textContent = 'Renamed page';
+ await h.settle();
+ assertDownloadLabels(linkButton, 'track', 'Renamed track');
+ assertDownloadLabels(h.w.document.querySelector('h1 + button'), 'track', 'Renamed page');
+
+ link.href = '/release/new/456';
+ link.textContent = 'New linked release';
+ h.w.history.pushState({}, '', '/release/new/456');
+ h.w.document.querySelector('h1').textContent = 'New page release';
+ await h.settle();
+ assert.equal(link.nextElementSibling, linkButton, 'link control is reused');
+ assertDownloadLabels(linkButton, 'full release', 'New linked release');
+ assertDownloadLabels(h.w.document.querySelector('h1 + button'), 'full release', 'New page release');
+});
+
 test('row batching places one action and releases listeners for removed media',async t=>{
  const h=setup(t);await h.settle();
  assert.equal(h.w.document.querySelectorAll('article button').length,1);
