@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.9
+// @version      2.0.10
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.9';
+    const CORE_VERSION = '2.0.10';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -853,8 +853,10 @@
     }
 
     const HELPER_URL = 'http://127.0.0.1:17854';
+    const QUEUE_RETRY_DELAYS = [1500, 3000, 6000, 12000];
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
+    let queueRetryPending = false, queueRetryAttempt = 0;
     let queuePageHidden = false;
     let pairingRequestedAt = 0;
     let queueSleepAt = 0, queueSleepTimer = 0;
@@ -1115,7 +1117,7 @@
         if (!queuePanel || document.hidden || queuePageHidden) return;
         // A collapsed queue still observes active work for new failures. An
         // idle collapsed queue must not start a permanent polling loop.
-        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork()) pollQueue();
+        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork() || queueRetryPending) pollQueue();
     }
 
     async function pollQueue() {
@@ -1124,8 +1126,14 @@
         queuePolling = true;
         try {
             const snapshot = await helperRequest('/jobs');
+            queueRetryPending = false;
+            queueRetryAttempt = 0;
             renderQueue(snapshot);
         } catch (error) {
+            // Keep only the intent to observe previously active work, not a
+            // stale snapshot. Bound retries so an unavailable helper can rest.
+            queueRetryPending = (queueHasActiveWork() || queueRetryPending) && queueRetryAttempt < QUEUE_RETRY_DELAYS.length;
+            if (queueRetryPending) queueRetryAttempt++;
             queueLastSnapshot = null;
             queueSleepAt = 0;
             window.clearTimeout(queueSleepTimer);
@@ -1133,7 +1141,10 @@
             queueMessage(error.message);
         } finally {
             queuePolling = false;
-            if (!document.hidden && !queuePageHidden && queueHasActiveWork()) queuePollTimer = window.setTimeout(pollQueue, 1500);
+            if (!document.hidden && !queuePageHidden && queueRetryPending) {
+                queuePollTimer = window.setTimeout(pollQueue, QUEUE_RETRY_DELAYS[queueRetryAttempt - 1]);
+            }
+            else if (!document.hidden && !queuePageHidden && queueHasActiveWork()) queuePollTimer = window.setTimeout(pollQueue, 1500);
             else if (queueLastSnapshot?.idle_remaining > 0 && !queuePanel.querySelector('[data-panel]').hidden && !document.hidden && !queuePageHidden) {
                 // Read the real deadline periodically: another tab may have
                 // extended it. GET never keeps the helper awake.
