@@ -464,6 +464,127 @@ function queueClock(h) {
     };
 }
 
+function failQueueRequests(h, kind = 'network') {
+    const respond = h.w.GM_xmlhttpRequest;
+    h.w.GM_xmlhttpRequest = request => {
+        h.requests.push(request);
+        if (kind === 'timeout') request.ontimeout();
+        else if (kind === 'http') request.onload({status:503, responseText:'{"error":"Temporarily unavailable"}'});
+        else request.onerror();
+    };
+    return () => { h.w.GM_xmlhttpRequest = respond; };
+}
+
+function assertQueueReadsOnly(h) {
+    assert(h.requests.every(request => request.method === 'GET' && request.url.endsWith('/jobs')));
+    assert.equal(h.downloads.length, 0, 'observation must never create a Hazel wake file');
+}
+
+for (const kind of ['network', 'timeout', 'http']) {
+    test(`transient ${kind} failure recovers collapsed active observation and later failure attention`, async t => {
+        const h = setup(t); await h.settle(); const clock = queueClock(h);
+        const button = h.shadow.querySelector('[data-toggle]');
+        // Unpaused queued work also warrants recovery without snapshot.active.
+        h.setSnapshot({active:kind !== 'http', jobs:[{id:'work', state:kind === 'http' ? 'queued' : 'downloading', title:'Track'}]});
+        button.click(); await h.settle(); h.shadow.querySelector('[data-close]').click();
+        const recover = failQueueRequests(h, kind), before = h.requests.length;
+        await clock.tick(1500);
+        assert.equal(h.requests.length, before + 1);
+        assert.deepEqual(clock.delays(), [1500], 'active observation must survive a failed GET');
+        assert.equal(button.classList.contains('needs-attention'), false, 'a transport failure is not a failed download');
+
+        recover(); await clock.tick(1500);
+        assert.equal(h.requests.length, before + 2);
+        assert.deepEqual(clock.delays(), [1500]);
+        h.setSnapshot({active:false, idle_remaining:180, jobs:[failure('work', Date.now()/1000 + 1)]});
+        await clock.tick(1500);
+        assert.equal(h.shadow.querySelector('[data-panel]').hidden, true);
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.match(button.textContent, /1 to check/);
+        assert.deepEqual(clock.delays(), [], 'a fresh idle snapshot ends collapsed observation');
+        assertQueueReadsOnly(h);
+    });
+}
+
+test('active recovery backs off, resets after success, and stops after four failed retries', async t => {
+    const h = setup(t); await h.settle(); const clock = queueClock(h);
+    const button = h.shadow.querySelector('[data-toggle]');
+    h.setSnapshot({active:true, jobs:[{id:'work', state:'processing', title:'Track'}]});
+    button.click(); await h.settle(); h.shadow.querySelector('[data-close]').click();
+    const recover = failQueueRequests(h);
+    await clock.tick(1500); await clock.tick(1500);
+    assert.deepEqual(clock.delays(), [3000]);
+    recover(); await clock.tick(3000);
+    assert.deepEqual(clock.delays(), [1500]);
+
+    const recoverAgain = failQueueRequests(h), before = h.requests.length;
+    await clock.tick(1500);
+    for (const delay of [1500, 3000, 6000, 12000]) {
+        assert.deepEqual(clock.delays(), [delay]);
+        await clock.tick(delay);
+    }
+    assert.equal(h.requests.length, before + 5, 'one failed poll plus four bounded retries');
+    assert.deepEqual(clock.delays(), []);
+    h.w.dispatchEvent(new h.w.PageTransitionEvent('pagehide', {persisted:true}));
+    h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
+    await h.settle();
+    assert.equal(h.requests.length, before + 5, 'restoring a collapsed page must not replenish exhausted retries');
+    recoverAgain(); button.click(); await h.settle();
+    assert.deepEqual(clock.delays(), [1500], 'an explicit refresh can restart observation');
+    assertQueueReadsOnly(h);
+});
+
+for (const state of ['idle', 'paused', 'waiting_venus']) {
+    test(`${state} helper request failure stops observation without waking the helper`, async t => {
+        const h = setup(t); await h.settle(); const clock = queueClock(h);
+        h.setSnapshot({active:false, paused:state === 'paused', idle_remaining:180,
+            jobs:state === 'idle' ? [] : [{id:'work', title:'Track', state:state === 'paused' ? 'queued' : state}]});
+        h.shadow.querySelector('[data-toggle]').click(); await h.settle();
+        assert.deepEqual(clock.delays(), [1000, 10000]);
+        failQueueRequests(h); await clock.tick(10000);
+        assert.deepEqual(clock.delays(), [], 'an idle deadline does not grant active-work retries');
+        h.shadow.querySelector('[data-close]').click();
+        const before = h.requests.length;
+        h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
+        await h.settle(); assert.equal(h.requests.length, before);
+        assertQueueReadsOnly(h);
+    });
+}
+
+test('an unavailable helper with no known active work is not retried', async t => {
+    const h = setup(t); await h.settle(); const clock = queueClock(h);
+    failQueueRequests(h);
+    h.shadow.querySelector('[data-toggle]').click(); await h.settle();
+    assert.deepEqual(clock.delays(), []);
+    assertQueueReadsOnly(h);
+});
+
+test('cross-tab acknowledgment during an outage survives recovery and a later failure still alerts', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage);
+    await Promise.all([a.settle(), b.settle()]);
+    const clock = queueClock(b), button = b.shadow.querySelector('[data-toggle]');
+    await showFailures(a, [failure('same', 120)]);
+    b.setSnapshot({active:true});
+    await showFailures(b, [failure('same', 100), {id:'work', title:'Track', state:'downloading'}]);
+    b.shadow.querySelector('[data-close]').click();
+    const recover = failQueueRequests(b);
+    await clock.tick(1500);
+    const before = b.requests.length;
+    reviewHistory(a); storage.flush();
+    assert.equal(b.requests.length, before, 'remote review must not initiate a request');
+    assert.deepEqual(clock.delays(), [1500]);
+    recover(); await clock.tick(1500);
+    assert.equal(button.classList.contains('needs-attention'), false);
+    assert.deepEqual(storage.get(SEEN_KEY), {same:120});
+    b.setSnapshot({active:false, jobs:[failure('same', 130)]});
+    await clock.tick(1500);
+    assert.equal(button.classList.contains('needs-attention'), true);
+    assert.deepEqual(storage.get(SEEN_KEY), {same:120});
+    assert.deepEqual(clock.delays(), []);
+    assertQueueReadsOnly(a); assertQueueReadsOnly(b);
+});
+
 for (const lifecycle of ['visibility', 'bfcache']) {
     function suspend(h) {
         if (lifecycle === 'visibility') {
@@ -477,6 +598,29 @@ for (const lifecycle of ['visibility', 'bfcache']) {
             h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
         } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
     }
+
+    test(`${lifecycle}: pending retries suspend and restoration preserves their bounded budget`, async t => {
+        const h = setup(t); await h.settle(); const clock = queueClock(h);
+        h.setSnapshot({active:true, jobs:[{id:'work', state:'downloading', title:'Track'}]});
+        h.shadow.querySelector('[data-toggle]').click(); await h.settle();
+        h.shadow.querySelector('[data-close]').click();
+        failQueueRequests(h);
+        await clock.tick(1500); await clock.tick(1500);
+        assert.deepEqual(clock.delays(), [3000]);
+        const before = h.requests.length;
+        suspend(h); await h.settle();
+        assert.deepEqual(clock.delays(), []);
+        assert.equal(h.requests.length, before);
+        restore(h); await h.settle();
+        assert.equal(h.requests.length, before + 1);
+        assert.deepEqual(clock.delays(), [6000], 'restoration must not reset the retry budget');
+        await clock.tick(6000); await clock.tick(12000);
+        assert.deepEqual(clock.delays(), []);
+        const exhausted = h.requests.length;
+        suspend(h); restore(h); await h.settle();
+        assert.equal(h.requests.length, exhausted);
+        assertQueueReadsOnly(h);
+    });
 
     test(`${lifecycle}: remote review while suspended preserves active polling and later failure attention`, async t => {
         const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
@@ -599,10 +743,13 @@ for (const lifecycle of ['visibility', 'bfcache']) {
         restore(h);await h.settle();assert.equal(h.requests.length,before+1);
         pending.onload({status:200,responseText:JSON.stringify({active:false,paused:false,jobs:[{id:'a',state:'processing',title:'Track'}]})});
         await h.settle();assert.deepEqual(clock.delays(),[1500]);
-        suspend(h);restore(h);
+        suspend(h);restore(h);suspend(h);
         pending.onerror();await h.settle();assert.deepEqual(clock.delays(),[]);
         const unavailable=h.requests.length;
-        suspend(h);restore(h);await h.settle();assert.equal(h.requests.length,unavailable);
+        restore(h);restore(h);await h.settle();assert.equal(h.requests.length,unavailable+1);
+        pending.onload({status:200,responseText:JSON.stringify({active:false,paused:false,jobs:[failure('a',Date.now()/1000+1)]})});
+        await h.settle();assert.deepEqual(clock.delays(),[]);
+        assert.equal(h.shadow.querySelector('[data-toggle]').classList.contains('needs-attention'),true);
         assert(h.requests.every(r=>r.method==='GET'));assert.equal(h.downloads.length,0);
     });
 
