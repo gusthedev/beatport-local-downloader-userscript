@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.10
+// @version      2.0.11
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.10';
+    const CORE_VERSION = '2.0.11';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -856,6 +856,7 @@
     const QUEUE_RETRY_DELAYS = [1500, 3000, 6000, 12000];
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
+    let queuePollStarted = false;
     let queueRetryPending = false, queueRetryAttempt = 0;
     let queuePageHidden = false;
     let pairingRequestedAt = 0;
@@ -971,10 +972,11 @@
         }
     }
 
-    function helperRequest(path, data) {
+    function helperRequest(path, data, isCurrent = () => true) {
+        const updatePairing = state => { if (isCurrent()) pairingStatus(state); };
         const token = loaderConfig.getHelperToken?.() || '';
         if (!token) {
-            pairingStatus('missing');
+            updatePairing('missing');
             return Promise.reject(new Error('Click Pair this browser for automatic setup.'));
         }
         return new Promise((resolve, reject) => GM_xmlhttpRequest({
@@ -984,14 +986,14 @@
             onload(response) {
                 try {
                     const value = JSON.parse(response.responseText);
-                    if (response.status === 403 && (!value.code || value.code === 'pairing_required')) pairingStatus('rejected');
+                    if (response.status === 403 && (!value.code || value.code === 'pairing_required')) updatePairing('rejected');
                     if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
-                    pairingStatus('connected');
+                    updatePairing('connected');
                     resolve(value);
                 } catch (error) { reject(error); }
             },
-            onerror() { pairingStatus('saved'); reject(new Error('Helper asleep or unavailable. Use Start / reconnect.')); },
-            ontimeout() { pairingStatus('saved'); reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
+            onerror() { updatePairing('saved'); reject(new Error('Helper asleep or unavailable. Use Start / reconnect.')); },
+            ontimeout() { updatePairing('saved'); reject(new Error('Helper did not respond. Accepted jobs stay saved; reconnect to check.')); },
         }));
     }
 
@@ -1124,6 +1126,9 @@
         window.clearTimeout(queuePollTimer);
         if (queuePolling || !queuePanel || document.hidden || queuePageHidden) return;
         queuePolling = true;
+        // Polls are single-flight. Once one starts, startup discovery can no
+        // longer publish queue or connection state, even if this poll fails.
+        queuePollStarted = true;
         try {
             const snapshot = await helperRequest('/jobs');
             queueRetryPending = false;
@@ -1279,7 +1284,12 @@
         instance.showQueue = () => setQueueOpen(true);
         // Discover an already-awake helper without launching anything. This
         // avoids app prompts just because a new Beatport page was opened.
-        if (loaderConfig.getHelperToken?.()) helperRequest('/jobs').then(renderQueue).catch(() => {});
+        if (loaderConfig.getHelperToken?.()) {
+            const isCurrent = () => !queuePollStarted;
+            helperRequest('/jobs', undefined, isCurrent).then(snapshot => {
+                if (isCurrent()) renderQueue(snapshot);
+            }).catch(() => {});
+        }
     }
 
     function start() {

@@ -52,7 +52,7 @@ function sharedStorage(initial = {}) {
     };
 }
 
-function setup(t, storage = sharedStorage()) {
+function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
     const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/example/123">Example</a></article><button id="player">Play</button></main>',
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
     const w = dom.window, requests = [], downloads = [];
@@ -65,7 +65,12 @@ function setup(t, storage = sharedStorage()) {
     w.HTMLAnchorElement.prototype.click = function() { downloads.push({href:this.href,download:this.download}); };
     w.BEATPORTDL_CONFIG = {helperEnabled:true,getHelperToken:()=> 'a'.repeat(64),setHelperToken(){},
         get localOnly(){return local;},setLocalOnly(value){local=value;modeChange?.();},onModeChange(fn){modeChange=fn;}};
-    w.GM_xmlhttpRequest = request => { requests.push(request);request.onload({status:200,responseText:JSON.stringify(request.url.endsWith('/jobs')&&request.method==='GET'?snapshot:{accepted:true})}); };
+    w.GM_xmlhttpRequest = request => {
+        requests.push(request);
+        const queueRead = request.url.endsWith('/jobs') && request.method === 'GET';
+        if (queueRead && deferJobs) return;
+        request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : {accepted:true})});
+    };
     const storageTab = storage.attach(w);
     w.__TM_BEATPORTDL_TEST_MODE__ = {};
     w.eval(source);
@@ -480,6 +485,124 @@ function assertQueueReadsOnly(h) {
     assert.equal(h.downloads.length, 0, 'observation must never create a Hazel wake file');
 }
 
+async function respondQueue(h, index, snapshot) {
+    const request = h.requests[index];
+    assert(request, `expected queue request ${index}`);
+    request.onload({status:200, responseText:JSON.stringify({active:false, paused:false, jobs:[], ...snapshot})});
+    await h.settle();
+}
+
+test('startup discovery still renders before polling begins without starting a polling loop', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true});
+    const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+    await respondQueue(h, 0, {active:true, current_count:2, jobs:[{id:'work', title:'Discovered work', state:'downloading'}]});
+    assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Discovered work/);
+    assert.equal(button.textContent, 'Downloads · 2');
+    assert.equal(h.shadow.querySelector('[data-pairing-status]').textContent, 'Connected to local helper');
+    assert.deepEqual(clock.delays(), []);
+    assert.equal(h.requests.length, 1);
+    button.click(); h.shadow.querySelector('[data-close]').click();
+    h.requests[1].onerror(); await h.settle();
+    assert.deepEqual(clock.delays(), [1500], 'accepted discovery can establish active work for recovery');
+    assertQueueReadsOnly(h);
+});
+
+for (const startupFirst of [true, false]) {
+    test(`startup discovery ${startupFirst ? 'before' : 'after'} the foreground response preserves the latest idle queue`, async t => {
+        const h = setup(t, sharedStorage({[ALERTS_SINCE_KEY]:50}), {deferJobs:true});
+        const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+        button.click(); h.shadow.querySelector('[data-close]').click();
+        assert.equal(h.requests.length, 2);
+        const startup = {active:true, current_count:8, jobs:[{id:'old', title:'Old work', state:'downloading'}]};
+        const foreground = {idle_remaining:0, current_count:0, history_count:7, retryable_count:1,
+            jobs:[failure('Latest failure', 100)]};
+        if (startupFirst) {
+            await respondQueue(h, 0, startup);
+            assert.doesNotMatch(h.shadow.querySelector('[data-jobs]').textContent, /Old work/,
+                'starting the foreground request immediately supersedes discovery');
+        }
+        await respondQueue(h, 1, foreground);
+        if (!startupFirst) await respondQueue(h, 0, startup);
+        assert.equal(h.shadow.querySelector('[data-jobs]').textContent, 'No current downloads.');
+        assert.match(h.shadow.querySelector('[data-history-jobs]').textContent, /Latest failure/);
+        assert.equal(h.shadow.querySelector('[data-history-title]').textContent, 'History · latest 1 of 7');
+        assert.equal(h.shadow.querySelector('[data-retry-failed]').textContent, 'Retry failed jobs (1)');
+        assert.equal(button.textContent, 'Downloads · 1 to check');
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.deepEqual(clock.delays(), []);
+        h.w.document.dispatchEvent(new h.w.Event('visibilitychange')); await h.settle();
+        assert.equal(h.requests.length, 2, 'a late startup snapshot must not revive collapsed idle polling');
+        assertQueueReadsOnly(h);
+    });
+}
+
+test('late startup idle data cannot replace active counts or prevent recovery and later failure attention', async t => {
+    const h = setup(t, sharedStorage({[ALERTS_SINCE_KEY]:50}), {deferJobs:true});
+    const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+    button.click(); h.shadow.querySelector('[data-close]').click();
+    await respondQueue(h, 1, {active:true, current_count:3, jobs:[{id:'work', title:'Current work', state:'processing'}]});
+    await respondQueue(h, 0, {jobs:[failure('Old failure', 90)]});
+    assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Current work/);
+    assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Showing 1 of 3 current jobs/);
+    assert.equal(button.textContent, 'Downloads · 3');
+    assert.equal(button.classList.contains('needs-attention'), false);
+    assert.deepEqual(clock.delays(), [1500]);
+    await clock.tick(1500); h.requests[2].onerror(); await h.settle();
+    assert.deepEqual(clock.delays(), [1500], 'fresh active work retains its retry budget');
+    await clock.tick(1500);
+    await respondQueue(h, 3, {jobs:[failure('work', 100)]});
+    assert.equal(button.classList.contains('needs-attention'), true);
+    assert.equal(button.textContent, 'Downloads · 1 to check');
+    assert.deepEqual(clock.delays(), []);
+    assertQueueReadsOnly(h);
+});
+
+for (const kind of ['network', 'timeout', 'http', 'pairing']) {
+    test(`late startup ${kind} failure cannot regress a successful foreground status`, async t => {
+        const h = setup(t, sharedStorage(), {deferJobs:true});
+        const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+        button.click(); h.shadow.querySelector('[data-close]').click();
+        await respondQueue(h, 1, {active:true, current_count:2, jobs:[{id:'work', title:'Current work', state:'downloading'}]});
+        const startup = h.requests[0];
+        if (kind === 'network') startup.onerror();
+        else if (kind === 'timeout') startup.ontimeout();
+        else startup.onload({status:kind === 'pairing' ? 403 : 503, responseText:JSON.stringify({error:'Late startup failure'})});
+        await h.settle();
+        assert.equal(h.shadow.querySelector('[data-pairing-status]').textContent, 'Connected to local helper');
+        assert.equal(h.shadow.querySelector('[data-auto-pair]').hidden, true);
+        assert.match(h.shadow.querySelector('[data-message]').textContent, /Working/);
+        assert.equal(button.textContent, 'Downloads · 2');
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), [1500]);
+        await clock.tick(1500);
+        assert.equal(h.requests.length, 3, 'late discovery failure must not add retries');
+        await respondQueue(h, 2, {});
+        assert.deepEqual(clock.delays(), []);
+        assertQueueReadsOnly(h);
+    });
+}
+
+test('late startup success cannot erase a foreground failure and explicit polling can recover', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true});
+    const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+    button.click(); h.shadow.querySelector('[data-close]').click();
+    h.requests[1].onerror(); await h.settle();
+    await respondQueue(h, 0, {active:true, current_count:4, jobs:[{id:'old', title:'Old work', state:'downloading'}]});
+    assert.match(h.shadow.querySelector('[data-pairing-status]').textContent, /helper asleep or unavailable/);
+    assert.match(h.shadow.querySelector('[data-message]').textContent, /Helper asleep or unavailable/);
+    assert.doesNotMatch(h.shadow.querySelector('[data-jobs]').textContent, /Old work/);
+    assert.equal(button.textContent, 'Downloads');
+    assert.deepEqual(clock.delays(), []);
+    h.w.document.dispatchEvent(new h.w.Event('visibilitychange')); await h.settle();
+    assert.equal(h.requests.length, 2, 'unknown active work does not grant automatic retries');
+    button.click();
+    await respondQueue(h, 2, {active:true, jobs:[{id:'new', title:'Recovered work', state:'processing'}]});
+    assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Recovered work/);
+    assert.equal(h.shadow.querySelector('[data-pairing-status]').textContent, 'Connected to local helper');
+    assert.deepEqual(clock.delays(), [1500]);
+    assertQueueReadsOnly(h);
+});
+
 for (const kind of ['network', 'timeout', 'http']) {
     test(`transient ${kind} failure recovers collapsed active observation and later failure attention`, async t => {
         const h = setup(t); await h.settle(); const clock = queueClock(h);
@@ -598,6 +721,28 @@ for (const lifecycle of ['visibility', 'bfcache']) {
             h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
         } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
     }
+
+    test(`${lifecycle}: late startup discovery cannot replace active state while suspended`, async t => {
+        const h = setup(t, sharedStorage({[ALERTS_SINCE_KEY]:50}), {deferJobs:true});
+        const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
+        button.click(); h.shadow.querySelector('[data-close]').click();
+        await respondQueue(h, 1, {active:true, jobs:[{id:'work', title:'Current work', state:'downloading'}]});
+        suspend(h);
+        await respondQueue(h, 0, {idle_remaining:180, jobs:[failure('Old failure', 90)]});
+        assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Current work/);
+        assert.equal(button.classList.contains('needs-attention'), false);
+        assert.deepEqual(clock.delays(), []);
+        restore(h); restore(h); await h.settle();
+        assert.equal(h.requests.length, 3, 'restore issues only one foreground request');
+        suspend(h); h.requests[2].onerror(); await h.settle();
+        assert.deepEqual(clock.delays(), []);
+        restore(h); await h.settle();
+        assert.equal(h.requests.length, 4, 'pending active-work recovery survives suspension');
+        await respondQueue(h, 3, {jobs:[failure('work', 100)]});
+        assert.equal(button.classList.contains('needs-attention'), true);
+        assert.deepEqual(clock.delays(), []);
+        assertQueueReadsOnly(h);
+    });
 
     test(`${lifecycle}: pending retries suspend and restoration preserves their bounded budget`, async t => {
         const h = setup(t); await h.settle(); const clock = queueClock(h);
