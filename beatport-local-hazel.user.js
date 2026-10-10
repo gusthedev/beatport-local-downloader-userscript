@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.11
+// @version      2.0.12
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.11';
+    const CORE_VERSION = '2.0.12';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -860,6 +860,7 @@
     let queueRetryPending = false, queueRetryAttempt = 0;
     let queuePageHidden = false;
     let pairingRequestedAt = 0;
+    let accountSaving = false;
     let queueSleepAt = 0, queueSleepTimer = 0;
 
     function updateHelperCountdown() {
@@ -1032,6 +1033,7 @@
 
     function setQueueOpen(open) {
         if (!queuePanel) return;
+        if (!open) clearAccountFields();
         queuePanel.querySelector('[data-panel]').hidden = !open;
         queuePanel.querySelector('[data-toggle]').setAttribute('aria-expanded', String(open));
         updateQueueAttention();
@@ -1041,6 +1043,8 @@
 
     function renderQueue(snapshot) {
         queueLastSnapshot = snapshot;
+        queuePanel.querySelector('[data-account-save]').disabled = accountSaving || !!snapshot.active;
+        queuePanel.querySelector('[data-account-busy]').hidden = !snapshot.active;
         queueSleepAt = typeof snapshot.idle_remaining === 'number' ? performance.now() + snapshot.idle_remaining * 1000 : 0;
         updateHelperCountdown();
         const jobs = snapshot.jobs || [];
@@ -1163,6 +1167,42 @@
         catch (error) { queueMessage(error.message, true); }
     }
 
+    function clearAccountFields() {
+        if (!queuePanel) return;
+        queuePanel.querySelector('[data-account-username]').value = '';
+        queuePanel.querySelector('[data-account-password]').value = '';
+    }
+
+    async function saveBeatportAccount() {
+        if (accountSaving || queueLastSnapshot?.active) return;
+        const userField = queuePanel.querySelector('[data-account-username]');
+        const passField = queuePanel.querySelector('[data-account-password]');
+        const feedback = queuePanel.querySelector('[data-account-result]');
+        let username = userField.value.trim(), password = passField.value;
+        if (!username || !password) { feedback.textContent = 'Enter both a username and password.'; return; }
+        if (username.length > 256 || password.length > 4096 || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(username + password)) {
+            feedback.textContent = 'Use single-line credentials within the field limits.'; return;
+        }
+        accountSaving = true;
+        queuePanel.querySelector('[data-account-save]').disabled = true;
+        feedback.textContent = 'Saving to the local downloader…';
+        // Never put account credentials in GM storage, URLs, status, or logs.
+        // Clear controls immediately; only this in-flight request holds them.
+        clearAccountFields();
+        try {
+            const result = await queueAPI('/account', { username, password });
+            if (!result.saved) throw new Error('Account update was not confirmed. Update the local helper and try again.');
+            feedback.textContent = 'Saved for both download modes. The next download signs in again; failed jobs were not retried. Your website login is unchanged.';
+            await pollQueue();
+        } catch (error) {
+            feedback.textContent = error.message;
+        } finally {
+            username = ''; password = '';
+            accountSaving = false;
+            queuePanel.querySelector('[data-account-save]').disabled = !!queueLastSnapshot?.active;
+        }
+    }
+
     function ensureQueuePanel() {
         if (queuePanel) return;
         queueHost = document.createElement('div');
@@ -1184,6 +1224,7 @@
               padding:14px;margin-top:6px;border:1px solid #41534a;border-radius:10px;background:#142019;color:#eff7f2;font:13px/1.4 system-ui;box-shadow:0 6px 20px #0005; }
             header,.actions { display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px; }
             [data-connect]:disabled { cursor:default; }
+            [data-account-save]:disabled { cursor:default;opacity:.55; }
             header strong { flex:1; } label,small { display:block; } small { color:#b9cbbf;overflow-wrap:anywhere; }
             select,input,textarea { max-width:100%;width:100%;margin:5px 0 9px; }
             input,textarea { background:#0e1712;color:#f0f7f3;border:1px solid #526258;border-radius:4px;padding:7px; }
@@ -1208,12 +1249,25 @@
               <div data-history-jobs></div>
             </details>
             <details><summary>Add a list of links</summary><label>One Beatport URL per line<textarea data-links rows="4"></textarea></label><button type="button" data-add>Queue list</button></details>
+            <details data-account><summary>Beatport account</summary>
+              <small>Changes the local downloader only, for both download modes. Saved passwords are never displayed. Login is checked by your next download.</small>
+              <small data-account-busy hidden>A job is running. Use Pause after current job, then save when it finishes.</small>
+              <label>Beatport username<input data-account-username type="text" maxlength="256" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+              <label>Password<input data-account-password type="password" maxlength="4096" autocomplete="off" spellcheck="false"></label>
+              <button type="button" data-account-save>Save downloader account</button>
+              <small data-account-result role="status" aria-live="polite"></small>
+            </details>
             <details data-pair><summary>Advanced connection settings</summary><button type="button" data-repair-pair>Pair this browser again</button>
               <small>Automatic setup opens your private local installer. Manual code entry is only a fallback.</small>
               <label>Private pairing code<input data-token type="password" autocomplete="off" spellcheck="false"></label><button type="button" data-save>Save pairing</button></details>
           </section>`;
         const find = selector => queuePanel.querySelector(selector);
         pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
+        find('[data-account-save]').addEventListener('click', saveBeatportAccount);
+        find('[data-account]').addEventListener('toggle', () => { if (!find('[data-account]').open) clearAccountFields(); });
+        find('[data-account]').addEventListener('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); saveBeatportAccount(); }
+        });
         find('[data-history]').addEventListener('toggle', updateQueueAttention);
         try {
             if (typeof GM_addValueChangeListener === 'function') {
@@ -1273,6 +1327,7 @@
             else resumeQueuePolling();
         });
         window.addEventListener('pagehide', () => {
+            clearAccountFields();
             queuePageHidden = true;
             suspendQueuePolling();
         }, { passive: true });

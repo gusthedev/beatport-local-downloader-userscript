@@ -69,7 +69,7 @@ function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
         requests.push(request);
         const queueRead = request.url.endsWith('/jobs') && request.method === 'GET';
         if (queueRead && deferJobs) return;
-        request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : {accepted:true})});
+        request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : request.url.endsWith('/account') ? {saved:true} : {accepted:true})});
     };
     const storageTab = storage.attach(w);
     w.__TM_BEATPORTDL_TEST_MODE__ = {};
@@ -77,6 +77,48 @@ function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
     t.after(()=>{storageTab.detach();w.__TM_BEATPORTDL_TEST_HOOKS__.instance.observer.disconnect();w.close();});
     return {w,shadow,requests,downloads,storageTab,setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
 }
+
+test('account settings send credentials only to the authenticated local helper and clear them', async t => {
+    const h=setup(t),stored=[];h.w.GM_setValue=(key,value)=>stored.push([key,value]);
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
+    assert.equal(user.value,'');assert.equal(pass.value,'');assert.equal(pass.type,'password');
+    user.value='  fixture-account  ';pass.value=' fixture: # password ';
+    const save=h.shadow.querySelector('[data-account-save]');save.click();save.click();
+    assert.equal(user.value,'');assert.equal(pass.value,'');await h.settle();
+    const sent=h.requests.filter(r=>r.url.endsWith('/account'));assert.equal(sent.length,1);
+    assert.equal(sent[0].url,'http://127.0.0.1:17854/account');assert.equal(sent[0].method,'POST');
+    assert.equal(sent[0].headers.Authorization,'Bearer '+'a'.repeat(64));
+    assert.deepEqual(JSON.parse(sent[0].data),{username:'fixture-account',password:' fixture: # password '});
+    assert(!JSON.stringify(stored).includes('fixture: # password'));
+    assert(!h.shadow.textContent.includes('fixture: # password'));
+    assert.match(h.shadow.querySelector('[data-account-result]').textContent,/next download signs in again/);
+    assert(!h.requests.some(r=>r.url.endsWith('/retry-failed')||r.url.endsWith('/resume')));
+});
+
+test('running jobs disable credential changes and collapsing clears unsaved fields', async t => {
+    const h=setup(t);h.setSnapshot({active:true});h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
+    user.value='fixture';pass.value='fixture-secret';
+    assert.equal(h.shadow.querySelector('[data-account-save]').disabled,true);
+    assert.equal(h.shadow.querySelector('[data-account-busy]').hidden,false);
+    h.shadow.querySelector('[data-account-save]').click();await h.settle();
+    assert(!h.requests.some(r=>r.url.endsWith('/account')));
+    h.shadow.querySelector('[data-close]').click();assert.equal(user.value,'');assert.equal(pass.value,'');
+});
+
+test('invalid account fields are not submitted and failed requests do not retain secrets', async t => {
+    const h=setup(t);h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
+    user.value='fixture';h.shadow.querySelector('[data-account-save]').click();await h.settle();
+    assert(!h.requests.some(r=>r.url.endsWith('/account')));
+    const original=h.w.GM_xmlhttpRequest;
+    h.w.GM_xmlhttpRequest=request=>request.url.endsWith('/account')?request.onerror():original(request);
+    pass.value='fixture-secret';h.shadow.querySelector('[data-account-save]').click();await h.settle();
+    assert.equal(pass.value,'');assert.equal(user.value,'');
+    assert.doesNotMatch(h.shadow.querySelector('[data-account-result]').textContent,/fixture-secret/);
+    assert.match(h.shadow.querySelector('[data-account-result]').textContent,/asleep or unavailable/);
+});
 
 test('manual retry controls require confirmation for all failures and offer transfer-only retry', async t => {
     const h=setup(t);

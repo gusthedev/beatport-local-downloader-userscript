@@ -16,6 +16,8 @@ Startup discovery yields to foreground queue polling as soon as polling begins. 
 
 The updated helper stays available for three idle minutes, then exits completely. The panel shows the helper's actual remaining minutes/seconds, with a lightweight status refresh while visible to account for activity in other tabs. Status reads never extend the idle deadline. Work in progress keeps the helper awake. **Start / reconnect** resumes pending work, but does not automatically retry failed downloads.
 
+Core 2.0.12 adds **Beatport account** in the download panel. Enter the downloader username and password and choose **Save downloader account**. This updates both download modes in the existing private local configuration, clears cached sessions, and signs in on the next download; it does not change the Beatport website login or automatically retry failures. Wait for the current job to finish (or use Pause after current job) before saving. Passwords are never fetched or displayed, never saved in userscript/browser storage, and only submitted to the authenticated loopback helper. Fields clear after submission, on closing the panel/account section, and on leaving the page. This requires local helper 2.0.5 or newer; no extra loader permission is needed.
+
 The Venus button reads **Venus Connected** and is disabled when already mounted, or **Venus Disconnected** and can be clicked to connect. Until the helper checks, it reads **Venus · not checked**. The panel does not repeat the fixed remote-import explanation.
 
 The helper is installed separately; this public loader contains no pairing secret. Click **Pair this browser** when setup is needed: a temporary Hazel trigger asks the installed helper to open its private installer in your normal Safari or Chrome session (other browsers use the system default). Approve **Update** in Tampermonkey and reload Beatport. If it says **Reinstall** or warns about resetting settings, cancel. The helper gives each private pairing copy a newer fourth version component so it updates the existing script while preserving preferences; future public patch versions still sort higher. No secret needs to be copied, and later public updates preserve pairing. The button requires the current private helper; the local Install Beatport Loader.command remains a fallback. Advanced connection settings contains manual repair, but is not required when the panel says connected.
@@ -47,7 +49,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.11** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.12** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -62,7 +64,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.11**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.12**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 ### Safari 27 playback
 
