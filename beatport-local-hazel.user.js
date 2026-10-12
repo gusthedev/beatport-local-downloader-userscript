@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.13
+// @version      2.0.14
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.13';
+    const CORE_VERSION = '2.0.14';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -87,6 +87,10 @@
     const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const SUBMISSION_PREFIX = 'beatport.submitted.v1.';
+    const DOWNLOAD_PREFIX = 'beatport.downloaded.v1.';
+    const DOWNLOAD_REVISION_KEY = 'beatport.downloadRevision.v1';
+    const downloadedMemory = new Map();
+    let downloadSync = null;
     const SUBMISSION_DAYS = 90;
     const SUBMISSION_TTL = SUBMISSION_DAYS * 24 * 60 * 60 * 1000;
     const SUBMISSION_CLEANUP_KEY = 'beatport.submissionCleanup.v1';
@@ -223,6 +227,41 @@
 
     function submissionKey(media) { return SUBMISSION_PREFIX + mediaKey(media); }
 
+    function downloadTime(media) {
+        if (!media) return 0;
+        const key = DOWNLOAD_PREFIX + mediaKey(media);
+        const saved = typeof GM_getValue === 'function' ? GM_getValue(key, 0) : 0;
+        return Math.max(validDownloadTime(saved), downloadedMemory.get(key) || 0);
+    }
+
+    function validDownloadTime(value) {
+        return Number.isSafeInteger(value) && value > 0 && value < 8640000000000000 ? value : 0;
+    }
+
+    function syncDownloadedRecords(revision) {
+        if (!/^[a-f0-9]{64}$/.test(revision || '') || downloadSync
+            || (typeof GM_getValue === 'function' && GM_getValue(DOWNLOAD_REVISION_KEY, '') === revision)) return;
+        // Reuse normal queue observations; never wake/poll the helper just for
+        // checkmarks. Per-ID monotonic writes avoid cross-tab lost updates.
+        downloadSync = helperRequest('/downloads', undefined, () => false).then(result => {
+            if (!/^[a-f0-9]{64}$/.test(result.revision || '') || !Array.isArray(result.downloads)) return;
+            for (const entry of result.downloads) {
+                if (!Array.isArray(entry) || entry.length !== 2) continue;
+                const [id, stamp] = entry;
+                if (typeof id !== 'string' || !/^(track|release|playlist|chart|label|artist):[0-9]{1,20}$/.test(id)
+                    || !validDownloadTime(stamp)) continue;
+                const key = DOWNLOAD_PREFIX + id;
+                const saved = typeof GM_getValue === 'function' ? GM_getValue(key, 0) : 0;
+                const next = Math.max(stamp, validDownloadTime(saved), downloadedMemory.get(key) || 0);
+                downloadedMemory.set(key, next);
+                if (typeof GM_setValue === 'function' && saved !== next) GM_setValue(key, next);
+            }
+            if (typeof GM_setValue === 'function') GM_setValue(DOWNLOAD_REVISION_KEY, result.revision);
+            refreshSubmissionIcons();
+        }).catch(() => { /* Keep confirmed cached marks when the helper sleeps. */ })
+            .finally(() => { downloadSync = null; });
+    }
+
     function submissionTime(media, now = Date.now()) {
         if (!media) return 0;
         const key = submissionKey(media);
@@ -235,10 +274,12 @@
         const media = icon._tmBeatportMedia;
         if (!media) return;
         const when = submissionTime(media);
+        const downloaded = downloadTime(media);
         icon.classList.toggle('tm-beatportdl-local-submitted', Boolean(when));
+        icon.classList.toggle('tm-beatportdl-local-downloaded', Boolean(downloaded));
         if (!instance.feedbackTimers.has(icon)) {
             icon.disabled = false;
-            icon.textContent = when ? '✓' : '⇩';
+            icon.textContent = downloaded ? '✓' : when ? '↻' : '⇩';
         }
         // Link and page-title controls both follow the text they describe.
         // Keep that context here so submission refreshes cannot overwrite it.
@@ -246,7 +287,8 @@
         const description = media.type === 'artist' || media.type === 'label' ? `${media.type} catalog`
             : media.type === 'release' ? 'full release' : media.type;
         const download = `${description} ${name} for local FLAC download`;
-        const action = when ? `Submitted ${new Date(when).toLocaleString()}; queue ${download} again`
+        const action = downloaded ? `Downloaded ${new Date(downloaded).toLocaleString()}; queue ${download} again`
+            : when ? `Submitted ${new Date(when).toLocaleString()} (download not confirmed); queue ${download} again`
             : `Queue ${download}`;
         icon.title = `${action} (Shift-click copies the URL)`;
         icon.setAttribute('aria-label', icon.title);
@@ -257,16 +299,20 @@
     }
 
     function watchSubmission(media) {
-        const key = submissionKey(media);
-        if (watchedSubmissions.has(key) || typeof GM_addValueChangeListener !== 'function'
+        if (typeof GM_addValueChangeListener !== 'function'
             || typeof GM_removeValueChangeListener !== 'function') return;
-        watchedSubmissions.set(key, GM_addValueChangeListener(key, refreshSubmissionIcons));
+        for (const key of [submissionKey(media), DOWNLOAD_PREFIX + mediaKey(media)]) {
+            if (!watchedSubmissions.has(key)) watchedSubmissions.set(key, GM_addValueChangeListener(key, refreshSubmissionIcons));
+        }
     }
 
     function pruneSubmissionListeners() {
         const visible = new Set();
         document.querySelectorAll(`.${ICON_CLASS}`).forEach(icon => {
-            if (icon._tmBeatportMedia) visible.add(submissionKey(icon._tmBeatportMedia));
+            if (icon._tmBeatportMedia) {
+                visible.add(submissionKey(icon._tmBeatportMedia));
+                visible.add(DOWNLOAD_PREFIX + mediaKey(icon._tmBeatportMedia));
+            }
         });
         for (const [key, listener] of watchedSubmissions) {
             if (!visible.has(key)) {
@@ -335,7 +381,7 @@
     function setFeedback(icon, success) {
         clearFeedback(icon);
         icon.disabled = true;
-        icon.textContent = success ? '✓' : '!';
+        icon.textContent = success ? (downloadTime(icon._tmBeatportMedia) ? '✓' : '…') : '!';
         icon.classList.toggle('tm-beatportdl-local-queued', success);
         icon.classList.toggle('tm-beatportdl-local-error', !success);
         const timer = window.setTimeout(() => clearFeedback(icon, true), FEEDBACK_MS);
@@ -391,7 +437,9 @@
 
     function handleMediaAction(event, media, icon) {
         if (event?.shiftKey) return copyMediaUrl(media, icon);
-        if (submissionTime(media) && !window.confirm(`This item was submitted in the last ${SUBMISSION_DAYS} days. Submit again?`)) return false;
+        const downloaded = downloadTime(media);
+        if (downloaded && !window.confirm('This item was already downloaded. Download again?')) return false;
+        if (!downloaded && submissionTime(media) && !window.confirm(`This item was submitted in the last ${SUBMISSION_DAYS} days. Submit again?`)) return false;
         if (!confirmLargeJob(media)) return false;
         return createHazelJob(media, icon);
     }
@@ -828,6 +876,7 @@
                 background: #0b2018; color: #fff; font: 600 12px system-ui; cursor: pointer;
             }
             .${ICON_CLASS}.tm-beatportdl-local-submitted { background: #fff; opacity: 1; }
+            .${ICON_CLASS}.tm-beatportdl-local-downloaded { background: #a6f3c8; opacity: 1; }
             .${ICON_CLASS}:hover, .${ICON_CLASS}:focus-visible { opacity: 1; transform: scale(1.12); }
             .${ICON_CLASS}:disabled { cursor: wait; }
             .${ICON_CLASS}.tm-beatportdl-local-queued { background: #ffffff; opacity: 1; }
@@ -1043,6 +1092,7 @@
 
     function renderQueue(snapshot) {
         queueLastSnapshot = snapshot;
+        syncDownloadedRecords(snapshot.download_revision);
         queuePanel.querySelector('[data-account-save]').disabled = accountSaving || !!snapshot.active;
         queuePanel.querySelector('[data-account-busy]').hidden = !snapshot.active;
         queueSleepAt = typeof snapshot.idle_remaining === 'number' ? performance.now() + snapshot.idle_remaining * 1000 : 0;
@@ -1385,6 +1435,8 @@
 
     instance.testHooks = {
         installSafariPlaybackFix,
+        downloadTime,
+        syncDownloadedRecords,
         submissionTime,
         recordSubmission,
         pruneSubmissionStorage,

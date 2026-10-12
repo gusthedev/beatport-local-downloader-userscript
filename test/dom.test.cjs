@@ -64,7 +64,7 @@ for (const [type, pathname, description] of [
   h.w.GM_setValue(`beatport.submitted.v1.${type}:123`, Date.now());
   await h.settle();
   for (const [button, name] of buttons) {
-   assert.equal(button.textContent, '✓');
+   assert.equal(button.textContent, '↻');
    assertDownloadLabels(button, description, name);
    for (const attribute of ['title', 'aria-label']) assert.match(button.getAttribute(attribute), /Submitted .*again/);
   }
@@ -105,16 +105,16 @@ test('download labels follow changed link text, hrefs, and page titles during na
 test('row batching places one action and releases listeners for removed media',async t=>{
  const h=setup(t);await h.settle();
  assert.equal(h.w.document.querySelectorAll('article button').length,1);
- assert.equal(h.listeners.size,1);
+ assert.equal(h.listeners.size,2);
  h.w.document.querySelector('article').remove();h.w.history.pushState({},'', '/genre/house/5');h.w.document.querySelector('h1').remove();await h.settle();
  assert.equal(h.listeners.size,0);
 });
 test('submission state survives navigation and receives cross-tab updates; expiry is pruned',async t=>{
  const h=setup(t);await h.settle();const key='beatport.submitted.v1.track:123';
  h.w.GM_setValue(key,Date.now());
- assert.equal(h.w.document.querySelector('article button').textContent,'✓');
+ assert.equal(h.w.document.querySelector('article button').textContent,'↻');
  assert.ok(h.hooks.submissionTime({type:'track',id:'123'}));
- const second=setup(t,h.storage);await second.settle();assert.equal(second.w.document.querySelector('article button').textContent,'✓');
+ const second=setup(t,h.storage);await second.settle();assert.equal(second.w.document.querySelector('article button').textContent,'↻');
  h.storage.set(key,Date.now()-90*86400000-1);h.storage.set('beatport.submissionCleanup.v1',0);h.hooks.pruneSubmissionStorage();h.w.dispatchEvent(new h.w.Event('focus'));
  assert.equal(h.storage.has(key),false);assert.equal(h.w.document.querySelector('article button').textContent,'⇩');
 });
