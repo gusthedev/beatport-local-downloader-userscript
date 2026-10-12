@@ -96,13 +96,91 @@ test('account settings send credentials only to the authenticated local helper a
     assert(!h.requests.some(r=>r.url.endsWith('/retry-failed')||r.url.endsWith('/resume')));
 });
 
+function accountKey(h, target, key) {
+    target.focus();
+    const event = new h.w.KeyboardEvent('keydown', {key, bubbles:true, composed:true, cancelable:true});
+    target.dispatchEvent(event);
+    return event;
+}
+
+for (const key of ['Enter', ' ']) {
+    test(`account summary leaves ${JSON.stringify(key)} activation to the browser without submitting`, async t => {
+        const h=setup(t);h.shadow.querySelector('[data-toggle]').click();await h.settle();
+        const details=h.shadow.querySelector('[data-account]'),summary=details.querySelector('summary');
+        const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
+        const feedback=h.shadow.querySelector('[data-account-result]');
+        for (const open of [false,true]) {
+            details.open=open;
+            for (const populated of [false,true]) {
+                user.value=populated?'fixture-account':'';pass.value=populated?'fixture-secret':'';
+                const event=accountKey(h,summary,key);
+                await h.settle();
+                // jsdom does not synthesize native keyboard activation. The
+                // handler must leave it uncanceled so browsers can toggle.
+                assert.equal(event.defaultPrevented,false);
+                assert.equal(feedback.textContent,'');
+                assert.equal(user.value,populated?'fixture-account':'');
+                assert.equal(pass.value,populated?'fixture-secret':'');
+                assert(!h.requests.some(r=>r.url.endsWith('/account')));
+            }
+        }
+    });
+}
+
+for (const field of ['username','password']) {
+    test(`Enter in the account ${field} submits once and clears credentials privately`, async t => {
+        const storage=sharedStorage(),h=setup(t,storage);
+        h.shadow.querySelector('[data-toggle]').click();await h.settle();
+        h.shadow.querySelector('[data-account]').open=true;
+        const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
+        const target=h.shadow.querySelector(`[data-account-${field}]`);
+        user.value='  fixture-account  ';pass.value=' fixture: # password ';
+        assert.equal(accountKey(h,target,' ').defaultPrevented,false);
+        assert(!h.requests.some(r=>r.url.endsWith('/account')));
+        assert.equal(accountKey(h,target,'Enter').defaultPrevented,true);
+        assert.equal(user.value,'');assert.equal(pass.value,'');
+        // Repeated Enter while a save is in flight must not post again, even
+        // if fields have been refilled before the first response settles.
+        user.value='fixture-account';pass.value='fixture-second-secret';
+        accountKey(h,target,'Enter');
+        await h.settle();
+        const sent=h.requests.filter(r=>r.url.endsWith('/account'));
+        assert.equal(sent.length,1);
+        assert.equal(sent[0].url,'http://127.0.0.1:17854/account');assert.equal(sent[0].method,'POST');
+        assert.equal(sent[0].headers.Authorization,'Bearer '+'a'.repeat(64));
+        assert.deepEqual(JSON.parse(sent[0].data),{username:'fixture-account',password:' fixture: # password '});
+        assert(!JSON.stringify(storage.writes).includes('fixture'));
+        assert.equal(h.w.localStorage.length,0);assert.equal(h.w.sessionStorage.length,0);
+        assert(!h.shadow.textContent.includes(' fixture: # password '));
+        assert(!h.requests.some(r=>r.url.endsWith('/retry-failed')||r.url.endsWith('/resume')));
+        h.shadow.querySelector('[data-close]').click();
+        assert.equal(user.value,'');assert.equal(pass.value,'');
+    });
+}
+
+for (const key of ['Enter', ' ']) {
+    test(`account Save button uses native ${JSON.stringify(key)} activation without a keydown submission`, async t => {
+        const h=setup(t);h.shadow.querySelector('[data-toggle]').click();await h.settle();
+        h.shadow.querySelector('[data-account]').open=true;
+        h.shadow.querySelector('[data-account-username]').value='fixture-account';
+        h.shadow.querySelector('[data-account-password]').value='fixture-secret';
+        const save=h.shadow.querySelector('[data-account-save]');
+        assert.equal(accountKey(h,save,key).defaultPrevented,false);
+        assert(!h.requests.some(r=>r.url.endsWith('/account')));
+        // Model the native click separately: jsdom has no keyboard defaults.
+        save.click();await h.settle();
+        assert.equal(h.requests.filter(r=>r.url.endsWith('/account')).length,1);
+    });
+}
+
 test('running jobs disable credential changes and collapsing clears unsaved fields', async t => {
     const h=setup(t);h.setSnapshot({active:true});h.shadow.querySelector('[data-toggle]').click();await h.settle();
     const user=h.shadow.querySelector('[data-account-username]'),pass=h.shadow.querySelector('[data-account-password]');
     user.value='fixture';pass.value='fixture-secret';
     assert.equal(h.shadow.querySelector('[data-account-save]').disabled,true);
     assert.equal(h.shadow.querySelector('[data-account-busy]').hidden,false);
-    h.shadow.querySelector('[data-account-save]').click();await h.settle();
+    h.shadow.querySelector('[data-account-save]').click();
+    accountKey(h,user,'Enter');accountKey(h,pass,'Enter');await h.settle();
     assert(!h.requests.some(r=>r.url.endsWith('/account')));
     h.shadow.querySelector('[data-close]').click();assert.equal(user.value,'');assert.equal(pass.value,'');
 });

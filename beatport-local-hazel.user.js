@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.12
+// @version      2.0.13
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.12';
+    const CORE_VERSION = '2.0.13';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -1265,9 +1265,13 @@
         pairingStatus(loaderConfig.getHelperToken?.() ? 'saved' : 'missing');
         find('[data-account-save]').addEventListener('click', saveBeatportAccount);
         find('[data-account]').addEventListener('toggle', () => { if (!find('[data-account]').open) clearAccountFields(); });
-        find('[data-account]').addEventListener('keydown', event => {
-            if (event.key === 'Enter') { event.preventDefault(); saveBeatportAccount(); }
-        });
+        // Only credential inputs submit on Enter. Keep native summary toggling
+        // and Save button keyboard activation (which dispatches a click).
+        for (const selector of ['[data-account-username]', '[data-account-password]']) {
+            find(selector).addEventListener('keydown', event => {
+                if (event.key === 'Enter') { event.preventDefault(); saveBeatportAccount(); }
+            });
+        }
         find('[data-history]').addEventListener('toggle', updateQueueAttention);
         try {
             if (typeof GM_addValueChangeListener === 'function') {
