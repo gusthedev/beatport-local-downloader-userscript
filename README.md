@@ -8,6 +8,8 @@ The panel starts collapsed near the top edge, away from the player. It can move 
 
 Current downloads remain in the main view. Finished and failed jobs appear in collapsed History, with only the latest 10 rendered and dated. **Clear completed** and **Clear failed** independently hide those entries without deleting audio, saved jobs, or retry logs. Pending transfers are never hidden. **Retry failed jobs** confirms the total, including older failures, before resuming saved stages; individual failed transfers also have **Retry transfer**.
 
+Core 2.0.14 restores **✓ downloaded** marks from the helper's saved completed-job records, including jobs submitted through TXT files or pasted lists. These marks have no expiry and remain visible after clearing History, reloading/navigating, or the helper going to sleep. A new or reset browser needs one successful connection to helper 2.0.6+ to rebuild its own cache: use **Start / reconnect** once if it is asleep. Regular queue observations check a compact revision; the full ID/timestamp list is fetched only when it changes. Reads never wake the helper or extend its idle time. Failed/incomplete jobs are not confirmed; later failed retries do not erase earlier successful downloads. Collection records mark the collection ID, not individual track IDs absent from the saved records. A checkmark means downloaded previously, not that the file is still present on disk today.
+
 The shared core turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
 If a status request fails after active work was observed, the panel retries up to four times with delays of 1.5, 3, 6, and 12 seconds, even when collapsed. A successful response resets the retry budget. Hidden or suspended pages pause observation and resume pending retries when restored; restoration does not replenish the budget. Idle queues do not receive these retries, and status checks never wake the helper.
@@ -37,7 +39,7 @@ The existing TXT batch/retry workflow remains supported by the local queue. Brow
 - Prevents rapid duplicate jobs and cleans temporary browser object URLs on a timer or when the page closes.
 - Deduplicates repeated links within the same list row and supports Shift-click to copy a canonical Beatport URL.
 - Shows queue-accepted/copied feedback and confirms potentially large artist or label catalog jobs by default.
-- Remembers recently submitted items for 90 days across navigation and tabs, and confirms deliberate resubmission. Stored-marker cleanup is checked on page load but runs only when a day has elapsed; visible markers still check their exact expiry. This records submission, not downloader completion; the live panel reports completion separately. Previously expired/deleted markers are not recreated.
+- Confirmed downloads show **✓** permanently and ask before downloading again. Recently submitted but unconfirmed items show **↻**, not a completed checkmark; that separate resubmission reminder lasts 90 days. Submission cleanup never deletes confirmed-download marks. Previously expired submission markers are not recreated, but saved completed jobs rebuild confirmed marks regardless of age or History visibility.
 - Processes repeated row links once per batch and limits title-control work to relevant changes.
 - Provides a visible, persistent local-only toggle synchronized with the loader menu. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
 - On Safari 27 only, selects standard MediaSource buffering for Beatport's signed-in HLS player to prevent seeks beyond the buffered audio from freezing. Chrome and other browser versions are untouched; no browser security or privacy settings are changed.
@@ -49,7 +51,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.13** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.14** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -64,7 +66,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.13**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.14**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 

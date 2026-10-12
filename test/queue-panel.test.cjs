@@ -57,6 +57,7 @@ function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
     const w = dom.window, requests = [], downloads = [];
     let shadow, local = false, modeChange, snapshot = {jobs:[],active:false,paused:false,venus:false};
+    let downloadRecords = {revision:'a'.repeat(64),downloads:[]};
     const attach = w.Element.prototype.attachShadow;
     w.Element.prototype.attachShadow = function(options) { shadow = attach.call(this, options); return shadow; };
     w.Range.prototype.getClientRects = () => [];
@@ -69,14 +70,73 @@ function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
         requests.push(request);
         const queueRead = request.url.endsWith('/jobs') && request.method === 'GET';
         if (queueRead && deferJobs) return;
-        request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : request.url.endsWith('/account') ? {saved:true} : {accepted:true})});
+        request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : request.url.endsWith('/downloads') ? downloadRecords : request.url.endsWith('/account') ? {saved:true} : {accepted:true})});
     };
     const storageTab = storage.attach(w);
     w.__TM_BEATPORTDL_TEST_MODE__ = {};
     w.eval(source);
     t.after(()=>{storageTab.detach();w.__TM_BEATPORTDL_TEST_HOOKS__.instance.observer.disconnect();w.close();});
-    return {w,shadow,requests,downloads,storageTab,setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
+    return {w,shadow,requests,downloads,storageTab,setDownloads(value){downloadRecords=value;},setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
 }
+
+test('confirmed downloads backfill cleared history and survive sleeping helper and new pages', async t => {
+    const storage=sharedStorage(),h=setup(t,storage),revision='b'.repeat(64),stamp=Date.now()-180*86400000;
+    h.setDownloads({revision,downloads:[['track:123',stamp],['track:456',stamp]]});
+    h.setSnapshot({download_revision:revision,jobs:[],history_count:0,history_cleared:true});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    const icon=h.w.document.querySelector('article button');
+    assert.equal(icon.textContent,'✓');assert.match(icon.title,/Downloaded/);
+    assert.equal(storage.get('beatport.downloaded.v1.track:123'),stamp);
+    assert.equal(h.requests.filter(r=>r.url.endsWith('/downloads')).length,1);
+    h.shadow.querySelector('[data-close]').click();h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.requests.filter(r=>r.url.endsWith('/downloads')).length,1,'unchanged revision needs no second record fetch');
+    assert.equal(icon.textContent,'✓');
+    const offline=setup(t,storage);offline.w.GM_xmlhttpRequest=request=>request.onerror();
+    offline.shadow.querySelector('[data-toggle]').click();await offline.settle();
+    assert.equal(offline.w.document.querySelector('article button').textContent,'✓');
+    let prompt='';offline.w.confirm=message=>{prompt=message;return false;};
+    offline.w.document.querySelector('article button').click();assert.match(prompt,/already downloaded/);
+    assert.equal(offline.downloads.length,0,'cache and lookup do not create wake files');
+});
+
+test('download cache learns list downloads and merges separate browser tabs without losing marks', async t => {
+    const storage=sharedStorage(),a=setup(t,storage),b=setup(t,storage),stamp=Date.now();
+    a.setDownloads({revision:'a'.repeat(64),downloads:[['track:123',stamp]]});
+    a.setSnapshot({download_revision:'a'.repeat(64)});a.shadow.querySelector('[data-toggle]').click();await a.settle();storage.flush();
+    assert.equal(b.w.document.querySelector('article button').textContent,'✓');
+    b.setDownloads({revision:'b'.repeat(64),downloads:[['track:456',stamp]]});
+    b.setSnapshot({download_revision:'b'.repeat(64)});b.shadow.querySelector('[data-toggle]').click();await b.settle();storage.flush();
+    assert.equal(storage.get('beatport.downloaded.v1.track:123'),stamp);
+    assert.equal(storage.get('beatport.downloaded.v1.track:456'),stamp);
+    const link=b.w.document.querySelector('article a');link.href='/track/list-item/456';link.textContent='List item';
+    await new Promise(resolve=>b.w.setTimeout(resolve,30));
+    assert.equal(link.nextElementSibling.textContent,'✓','later DOM/navigation also uses cached ID records');
+});
+
+test('submissions, failures, partial transfers, and malformed records cannot claim completion', async t => {
+    const h=setup(t),stamp=Date.now(),hooks=h.w.__TM_BEATPORTDL_TEST_HOOKS__;
+    hooks.recordSubmission({type:'track',id:'123'});
+    assert.equal(h.w.document.querySelector('article button').textContent,'↻');
+    h.setSnapshot({download_revision:'c'.repeat(64),jobs:[failure('old',100)]});
+    h.setDownloads({revision:'c'.repeat(64),downloads:[['track:123','123'],['track:123',-1],['__proto__',stamp],['track:456',stamp]]});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(h.w.document.querySelector('article button').textContent,'↻');
+    assert.equal(hooks.downloadTime({type:'track',id:'123'}),0);
+    assert.equal(hooks.downloadTime({type:'track',id:'456'}),stamp);
+});
+
+test('failed record sync preserves cache and retries on the next existing queue observation', async t => {
+    const stamp=Date.now(),storage=sharedStorage({'beatport.downloaded.v1.track:123':stamp}),h=setup(t,storage);
+    const original=h.w.GM_xmlhttpRequest;
+    h.w.GM_xmlhttpRequest=request=>request.url.endsWith('/downloads')?request.onerror():original(request);
+    h.setSnapshot({download_revision:'d'.repeat(64)});h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(storage.get('beatport.downloadRevision.v1'),undefined);
+    assert.equal(h.w.document.querySelector('article button').textContent,'✓');
+    h.w.GM_xmlhttpRequest=original;h.setDownloads({revision:'d'.repeat(64),downloads:[['track:456',stamp]]});
+    h.shadow.querySelector('[data-close]').click();h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    assert.equal(storage.get('beatport.downloaded.v1.track:456'),stamp);
+    assert.equal(storage.get('beatport.downloaded.v1.track:123'),stamp);
+});
 
 test('account settings send credentials only to the authenticated local helper and clear them', async t => {
     const h=setup(t),stored=[];h.w.GM_setValue=(key,value)=>stored.push([key,value]);
