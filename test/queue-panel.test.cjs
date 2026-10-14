@@ -52,7 +52,7 @@ function sharedStorage(initial = {}) {
     };
 }
 
-function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
+function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads = false} = {}) {
     const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/example/123">Example</a></article><button id="player">Play</button></main>',
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
     const w = dom.window, requests = [], downloads = [];
@@ -70,6 +70,7 @@ function setup(t, storage = sharedStorage(), {deferJobs = false} = {}) {
         requests.push(request);
         const queueRead = request.url.endsWith('/jobs') && request.method === 'GET';
         if (queueRead && deferJobs) return;
+        if (request.url.endsWith('/downloads') && deferDownloads) return;
         request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : request.url.endsWith('/downloads') ? downloadRecords : request.url.endsWith('/account') ? {saved:true} : {accepted:true})});
     };
     const storageTab = storage.attach(w);
@@ -137,6 +138,206 @@ test('failed record sync preserves cache and retries on the next existing queue 
     assert.equal(storage.get('beatport.downloaded.v1.track:456'),stamp);
     assert.equal(storage.get('beatport.downloaded.v1.track:123'),stamp);
 });
+
+const DOWNLOAD_REVISION_KEY = 'beatport.downloadRevision.v1';
+const revisionA = 'a'.repeat(64), revisionB = 'b'.repeat(64), revisionC = 'c'.repeat(64), revisionD = 'd'.repeat(64);
+const downloadRequests = h => h.requests.filter(request => request.url.endsWith('/downloads'));
+
+async function respondDownloads(h, index, revision, downloads = []) {
+    const request = downloadRequests(h)[index];
+    assert(request, `expected download record request ${index}`);
+    request.onload({status:200, responseText:JSON.stringify({revision, downloads})});
+    await h.settle();
+}
+
+test('overlapping download revisions sync the latest records without another queue observation', async t => {
+    const storage = sharedStorage(), h = setup(t, storage, {deferDownloads:true});
+    await h.settle();
+    const sync = h.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords, stamp = Date.now();
+    sync(revisionA);
+    sync(revisionB);
+    assert.equal(downloadRequests(h).length, 1, 'record requests stay single-flight');
+    await respondDownloads(h, 0, revisionA, [['track:456', stamp]]);
+    assert.equal(downloadRequests(h).length, 2, 'the newer revision must be drained automatically');
+    await respondDownloads(h, 1, revisionB, [['track:123', stamp]]);
+    assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionB);
+    assert.equal(storage.get('beatport.downloaded.v1.track:456'), stamp);
+    assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+    sync(revisionB);
+    assert.equal(downloadRequests(h).length, 2, 'the cached revision needs no further request');
+    assert.equal(h.requests.filter(request => request.url.endsWith('/jobs')).length, 1);
+    assert.equal(h.downloads.length, 0);
+});
+
+for (const persistent of [true, false]) {
+    test(`a download response already containing the pending revision avoids a second read (${persistent ? 'stored' : 'memory-only'})`, async t => {
+        const h = setup(t, sharedStorage(), {deferDownloads:true});
+        await h.settle();
+        if (!persistent) {
+            delete h.w.GM_getValue;
+            delete h.w.GM_setValue;
+        }
+        const sync = h.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords;
+        sync(revisionA);
+        sync(revisionB);
+        sync(revisionC);
+        sync(revisionC);
+        await respondDownloads(h, 0, revisionC, [['track:123', Date.now()]]);
+        assert.equal(downloadRequests(h).length, 1);
+        assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+        assert.equal(h.downloads.length, 0);
+    });
+}
+
+test('duplicate or invalid observations do not refetch a successful newer download response', async t => {
+    const storage = sharedStorage(), h = setup(t, storage, {deferDownloads:true});
+    await h.settle();
+    const sync = h.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords, clock = queueClock(h);
+    sync(revisionA);
+    sync(revisionA);
+    sync('invalid');
+    sync(undefined);
+    await respondDownloads(h, 0, revisionB);
+    assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionB);
+    assert.equal(downloadRequests(h).length, 1, 'revisions are opaque hashes, not a target to poll until equal');
+    sync(revisionB);
+    assert.equal(downloadRequests(h).length, 1);
+    assert.deepEqual(clock.delays(), []);
+});
+
+test('repeated download revision changes coalesce to the latest observation on each read', async t => {
+    const storage = sharedStorage(), h = setup(t, storage, {deferDownloads:true});
+    await h.settle();
+    const sync = h.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords, clock = queueClock(h), stamp = Date.now();
+    sync(revisionA);
+    sync(revisionB);
+    sync(revisionC);
+    sync('malformed');
+    assert.equal(downloadRequests(h).length, 1);
+    await respondDownloads(h, 0, revisionA, [['track:123', stamp]]);
+    assert.equal(downloadRequests(h).length, 2);
+    sync(revisionC);
+    sync(revisionD);
+    sync(revisionD);
+    assert.equal(downloadRequests(h).length, 2);
+    await respondDownloads(h, 1, revisionC, [['track:123', stamp - 100], ['track:456', stamp]]);
+    assert.equal(downloadRequests(h).length, 3);
+    await respondDownloads(h, 2, revisionD, [['track:789', stamp]]);
+    sync(revisionD);
+    assert.equal(downloadRequests(h).length, 3);
+    assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionD);
+    for (const id of ['123', '456', '789']) assert.equal(storage.get('beatport.downloaded.v1.track:' + id), stamp);
+    assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+    assert.deepEqual(clock.delays(), []);
+    assert.equal(h.downloads.length, 0);
+});
+
+test('the final idle queue revision drains after active polling stops', async t => {
+    const storage = sharedStorage(), h = setup(t, storage, {deferDownloads:true});
+    await h.settle();
+    const clock = queueClock(h), stamp = Date.now();
+    h.setSnapshot({active:true, download_revision:revisionA, jobs:[{id:'work', state:'downloading'}]});
+    h.shadow.querySelector('[data-toggle]').click();
+    await h.settle();
+    h.shadow.querySelector('[data-close]').click();
+    assert.deepEqual(clock.delays(), [1500]);
+    h.setSnapshot({active:false, idle_remaining:0, download_revision:revisionB, jobs:[]});
+    await clock.tick(1500);
+    assert.deepEqual(clock.delays(), [], 'the idle collapsed queue stops polling');
+    const queueReads = h.requests.filter(request => request.url.endsWith('/jobs')).length;
+    await respondDownloads(h, 0, revisionA);
+    assert.equal(downloadRequests(h).length, 2);
+    await respondDownloads(h, 1, revisionB, [['track:123', stamp]]);
+    assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionB);
+    assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+    assert.equal(h.requests.filter(request => request.url.endsWith('/jobs')).length, queueReads);
+    assert.deepEqual(clock.delays(), []);
+    assert(h.requests.every(request => request.method === 'GET' && /\/(jobs|downloads)$/.test(request.url)));
+    assert.equal(h.downloads.length, 0, 'sync never creates a Hazel wake file');
+});
+
+for (const startupFirst of [true, false]) {
+    test(`out-of-order startup revision ${startupFirst ? 'before' : 'after'} foreground records cannot schedule stale sync`, async t => {
+        const storage = sharedStorage(), h = setup(t, storage, {deferJobs:true, deferDownloads:true});
+        const clock = queueClock(h);
+        h.shadow.querySelector('[data-toggle]').click();
+        h.shadow.querySelector('[data-close]').click();
+        await respondQueue(h, 1, {download_revision:revisionB, idle_remaining:0});
+        if (startupFirst) await respondQueue(h, 0, {download_revision:revisionA});
+        await respondDownloads(h, 0, revisionB, [['track:123', Date.now()]]);
+        if (!startupFirst) await respondQueue(h, 0, {download_revision:revisionA});
+        assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionB);
+        assert.equal(downloadRequests(h).length, 1);
+        assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+        assert.deepEqual(clock.delays(), []);
+        assert.equal(h.downloads.length, 0);
+    });
+}
+
+for (const reverse of [true, false]) {
+    test(`out-of-order download responses across tabs preserve the cache and monotonic marks (${reverse ? 'reverse' : 'forward'} notifications)`, async t => {
+        const storage = sharedStorage(), a = setup(t, storage, {deferDownloads:true}), b = setup(t, storage, {deferDownloads:true});
+        await a.settle(); await b.settle();
+        const syncA = a.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords, stamp = Date.now();
+        syncA(revisionA);
+        b.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords(revisionB);
+        await respondDownloads(b, 0, revisionB, [['track:123', stamp], ['track:789', stamp]]);
+        syncA(revisionB); // Already cached remotely while A is still in flight.
+        await respondDownloads(a, 0, revisionA, [['track:123', stamp - 100], ['track:456', stamp - 100]]);
+        storage.flush({reverse});
+        assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionB, 'a late response cannot clobber another tab\'s committed revision');
+        assert.equal(storage.get('beatport.downloaded.v1.track:123'), stamp);
+        assert.equal(storage.get('beatport.downloaded.v1.track:456'), stamp - 100);
+        assert.equal(storage.get('beatport.downloaded.v1.track:789'), stamp);
+        for (const h of [a, b]) {
+            assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+            assert.equal(downloadRequests(h).length, 1, 'another tab already satisfied the pending revision');
+            assert.equal(h.downloads.length, 0);
+        }
+    });
+}
+
+for (const kind of ['network', 'timeout', 'http', 'malformed']) {
+    test(`overlapping sync survives ${kind} failures, stops when asleep, and recovers on observation`, async t => {
+        const stamp = Date.now(), storage = sharedStorage({'beatport.downloaded.v1.track:123':stamp});
+        const h = setup(t, storage, {deferDownloads:true});
+        await h.settle();
+        const sync = h.w.__TM_BEATPORTDL_TEST_HOOKS__.syncDownloadedRecords, clock = queueClock(h);
+        sync(revisionA);
+        sync(revisionB);
+        sync(revisionC);
+        const fail = request => {
+            if (kind === 'network') request.onerror();
+            else if (kind === 'timeout') request.ontimeout();
+            else if (kind === 'http') request.onload({status:503, responseText:'{"error":"Unavailable"}'});
+            else request.onload({status:200, responseText:JSON.stringify({revision:revisionC, downloads:null})});
+        };
+        fail(downloadRequests(h)[0]);
+        await h.settle();
+        assert.equal(downloadRequests(h).length, 2, 'the latest distinct observation gets one follow-up attempt');
+        sync(revisionC);
+        fail(downloadRequests(h)[1]);
+        await h.settle();
+        assert.equal(downloadRequests(h).length, 2, 'a repeated revision cannot turn failure into an automatic retry loop');
+        assert.equal(storage.get(DOWNLOAD_REVISION_KEY), undefined);
+        assert.equal(h.w.document.querySelector('article button').textContent, '✓');
+        assert.deepEqual(clock.delays(), []);
+        h.setSnapshot({download_revision:revisionC});
+        h.shadow.querySelector('[data-toggle]').click();
+        await h.settle();
+        h.shadow.querySelector('[data-close]').click();
+        assert.equal(downloadRequests(h).length, 3, 'a normal queue observation recovers after failure');
+        await respondDownloads(h, 2, revisionC, [['track:123', stamp - 100], ['track:456', stamp]]);
+        assert.equal(storage.get(DOWNLOAD_REVISION_KEY), revisionC);
+        assert.equal(storage.get('beatport.downloaded.v1.track:123'), stamp);
+        assert.equal(storage.get('beatport.downloaded.v1.track:456'), stamp);
+        sync(revisionC);
+        assert.equal(downloadRequests(h).length, 3);
+        assert.deepEqual(clock.delays(), []);
+        assert(h.requests.every(request => request.method === 'GET' && /\/(jobs|downloads)$/.test(request.url)));
+        assert.equal(h.downloads.length, 0);
+    });
+}
 
 test('account settings send credentials only to the authenticated local helper and clear them', async t => {
     const h=setup(t),stored=[];h.w.GM_setValue=(key,value)=>stored.push([key,value]);
