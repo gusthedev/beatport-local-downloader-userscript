@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.14
+// @version      2.0.15
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.14';
+    const CORE_VERSION = '2.0.15';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -91,6 +91,7 @@
     const DOWNLOAD_REVISION_KEY = 'beatport.downloadRevision.v1';
     const downloadedMemory = new Map();
     let downloadSync = null;
+    let pendingDownloadRevision = '';
     const SUBMISSION_DAYS = 90;
     const SUBMISSION_TTL = SUBMISSION_DAYS * 24 * 60 * 60 * 1000;
     const SUBMISSION_CLEANUP_KEY = 'beatport.submissionCleanup.v1';
@@ -239,8 +240,14 @@
     }
 
     function syncDownloadedRecords(revision) {
-        if (!/^[a-f0-9]{64}$/.test(revision || '') || downloadSync
-            || (typeof GM_getValue === 'function' && GM_getValue(DOWNLOAD_REVISION_KEY, '') === revision)) return;
+        if (!/^[a-f0-9]{64}$/.test(revision || '')) return;
+        if (downloadSync) {
+            pendingDownloadRevision = revision;
+            return;
+        }
+        const cachedRevision = typeof GM_getValue === 'function' ? GM_getValue(DOWNLOAD_REVISION_KEY, '') : '';
+        if (cachedRevision === revision) return;
+        let syncedRevision = '';
         // Reuse normal queue observations; never wake/poll the helper just for
         // checkmarks. Per-ID monotonic writes avoid cross-tab lost updates.
         downloadSync = helperRequest('/downloads', undefined, () => false).then(result => {
@@ -256,10 +263,22 @@
                 downloadedMemory.set(key, next);
                 if (typeof GM_setValue === 'function' && saved !== next) GM_setValue(key, next);
             }
-            if (typeof GM_setValue === 'function') GM_setValue(DOWNLOAD_REVISION_KEY, result.revision);
+            // Do not replace a revision another tab committed during this read.
+            if (typeof GM_setValue === 'function'
+                && (typeof GM_getValue !== 'function' || GM_getValue(DOWNLOAD_REVISION_KEY, '') === cachedRevision)) {
+                GM_setValue(DOWNLOAD_REVISION_KEY, result.revision);
+            }
+            syncedRevision = result.revision;
             refreshSubmissionIcons();
         }).catch(() => { /* Keep confirmed cached marks when the helper sleeps. */ })
-            .finally(() => { downloadSync = null; });
+            .finally(() => {
+                downloadSync = null;
+                const pending = pendingDownloadRevision;
+                pendingDownloadRevision = '';
+                // Drain only a different observation, not a retry loop. The
+                // response (or another tab's cache) may already satisfy it.
+                if (pending && pending !== revision && pending !== syncedRevision) syncDownloadedRecords(pending);
+            });
     }
 
     function submissionTime(media, now = Date.now()) {
