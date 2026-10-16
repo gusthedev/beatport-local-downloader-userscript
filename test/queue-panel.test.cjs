@@ -52,7 +52,7 @@ function sharedStorage(initial = {}) {
     };
 }
 
-function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads = false} = {}) {
+function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads = false, deferActions = false} = {}) {
     const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/example/123">Example</a></article><button id="player">Play</button></main>',
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
     const w = dom.window, requests = [], downloads = [];
@@ -71,6 +71,7 @@ function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads 
         const queueRead = request.url.endsWith('/jobs') && request.method === 'GET';
         if (queueRead && deferJobs) return;
         if (request.url.endsWith('/downloads') && deferDownloads) return;
+        if (request.method === 'POST' && deferActions) return;
         request.onload({status:200,responseText:JSON.stringify(queueRead ? snapshot : request.url.endsWith('/downloads') ? downloadRecords : request.url.endsWith('/account') ? {saved:true} : {accepted:true})});
     };
     const storageTab = storage.attach(w);
@@ -873,6 +874,223 @@ async function respondQueue(h, index, snapshot) {
     await h.settle();
 }
 
+const queueReads = h => h.requests.filter(request => request.method === 'GET' && request.url.endsWith('/jobs'));
+const respondQueueRead = (h, index, snapshot) => respondQueue(h, h.requests.indexOf(queueReads(h)[index]), snapshot);
+const actionPosts = h => h.requests.filter(request => request.method === 'POST');
+async function respondAction(h, index, status = 200) {
+    const request = actionPosts(h)[index];
+    assert(request, `expected action request ${index}`);
+    request.onload({status, responseText:JSON.stringify(status === 200 ? {accepted:true} : {error:'Action refused'})});
+    await h.settle();
+}
+
+test('successful retry during a pending read drains a fresh queue read after stale idle completion', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true}), clock = queueClock(h);
+    await respondQueueRead(h, 0, {jobs:[failure('work', 100)]});
+    h.shadow.querySelector('[data-toggle]').click();
+    h.shadow.querySelector('[data-history-jobs] button').click();
+    await h.settle();
+    h.shadow.querySelector('[data-close]').click();
+    assert(h.requests.some(request => request.method === 'POST' && request.url.endsWith('/retry')));
+    assert.equal(queueReads(h).length, 2, 'the existing queue read stays single-flight');
+    await respondQueueRead(h, 1, {idle_remaining:0});
+    assert.equal(queueReads(h).length, 3, 'successful retry must not lose its refresh to the stale idle response');
+    await respondQueueRead(h, 2, {active:true, jobs:[{id:'work', title:'Retrying work', state:'queued'}]});
+    assert.match(h.shadow.querySelector('[data-jobs]').textContent, /Retrying work/);
+    assert.deepEqual(clock.delays(), [1500]);
+    await clock.tick(1500);
+    await respondQueueRead(h, 3, {idle_remaining:0});
+    assert.deepEqual(clock.delays(), [], 'idle completion ends observation');
+    assert.equal(h.downloads.length, 0, 'status refresh never wakes the helper');
+});
+
+for (const [name, selector, endpoint, initial, fresh] of [
+    ['Retry all', '[data-retry-failed]', '/retry-failed', {retryable_count:1}, {active:true}],
+    ['Pause', '[data-pause]', '/pause', {}, {paused:true}],
+    ['Resume', '[data-pause]', '/resume', {paused:true}, {active:true}],
+    ['Clear completed', '[data-clear-completed]', '/history/clear-completed', {completed_history_count:1}, {}],
+    ['Clear failed', '[data-clear-failed]', '/history/clear-failed', {failed_history_count:1}, {}],
+    ['Connect', '[data-connect]', '/connect', {}, {venus:true}],
+    ['Start / reconnect', '[data-wake]', '/resume', {paused:true}, {active:true}],
+    ['Add list', '[data-add]', '/jobs', {}, {active:true}],
+    ['Save account', '[data-account-save]', '/account', {}, {}],
+    ['Download track', null, '/jobs', {}, {active:true}],
+]) {
+    test(`${name} coalesces its refresh behind a pending queue read`, async t => {
+        const h = setup(t, sharedStorage(), {deferJobs:true}), clock = queueClock(h);
+        await respondQueueRead(h, 0, {history_count:1, jobs:[failure('old', 100)], ...initial});
+        h.w.confirm = () => true;
+        h.shadow.querySelector('[data-links]').value = 'https://www.beatport.com/track/example/123';
+        h.shadow.querySelector('[data-account-username]').value = 'fixture';
+        h.shadow.querySelector('[data-account-password]').value = 'fixture';
+        h.shadow.querySelector('[data-toggle]').click();
+        if (selector) h.shadow.querySelector(selector).click();
+        else h.w.__TM_BEATPORTDL_TEST_HOOKS__.createHazelJob(
+            {type:'track', id:'123', url:'https://www.beatport.com/track/example/123'}, h.w.document.createElement('button'));
+        await h.settle();
+        h.shadow.querySelector('[data-close]').click();
+        assert(actionPosts(h).some(request => request.url.endsWith(endpoint)));
+        assert.equal(queueReads(h).length, 2);
+        await respondQueueRead(h, 1, {idle_remaining:0, download_revision:revisionA, note:'Obsolete snapshot'});
+        assert.equal(queueReads(h).length, 3);
+        assert.doesNotMatch(h.shadow.querySelector('[data-message]').textContent, /Obsolete snapshot/);
+        assert.equal(downloadRequests(h).length, 0, 'obsolete queue data must not start a download-record sync');
+        await respondQueueRead(h, 2, {history_count:0, note:'Updated after action', ...fresh});
+        assert.equal(h.shadow.querySelector('[data-history-title]').textContent, 'History · empty');
+        assert.equal(h.shadow.querySelector('[data-message]').textContent, fresh.paused ? 'Queue saved and paused.' : 'Updated after action');
+        assert.equal(h.shadow.querySelector('[data-pause]').textContent, fresh.paused ? 'Resume queue' : 'Pause after current job');
+        assert.equal(h.shadow.querySelector('[data-connect]').disabled, !!fresh.venus);
+        if (fresh.active) {
+            await clock.tick(1500);
+            await respondQueueRead(h, 3, {idle_remaining:0});
+        }
+        // Download feedback uses unrelated UI timers; it must not wake the helper.
+        if (selector) assert.deepEqual(clock.delays(), []);
+        assert.equal(actionPosts(h).length, 1);
+        assert.equal(h.downloads.length, 0);
+    });
+}
+
+test('overlapping successful actions coalesce per read and a later action drains again', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true, deferActions:true}), clock = queueClock(h);
+    await respondQueueRead(h, 0, {});
+    h.shadow.querySelector('[data-toggle]').click();
+    for (let i = 0; i < 3; i++) h.shadow.querySelector('[data-pause]').click();
+    await h.settle();
+    for (const index of [2, 0, 1]) await respondAction(h, index);
+    assert.equal(queueReads(h).length, 2, 'actions must not run concurrent queue reads');
+    await respondQueueRead(h, 1, {note:'Stale first read'});
+    assert.equal(queueReads(h).length, 3, 'three completed actions need only one fresh read');
+    h.shadow.querySelector('[data-pause]').click(); await h.settle();
+    await respondAction(h, 3);
+    await respondQueueRead(h, 2, {note:'Stale second read'});
+    assert.equal(queueReads(h).length, 4, 'an action during the drain still needs a later read');
+    await respondQueueRead(h, 3, {paused:true});
+    assert.equal(h.shadow.querySelector('[data-message]').textContent, 'Queue saved and paused.');
+    assert.deepEqual(clock.delays(), []);
+    assert.equal(h.downloads.length, 0);
+});
+
+test('ordinary overlapping observations do not request a trailing refresh', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true}), clock = queueClock(h);
+    await respondQueueRead(h, 0, {});
+    h.shadow.querySelector('[data-toggle]').click();
+    for (let i = 0; i < 3; i++) h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
+    await respondQueueRead(h, 1, {});
+    assert.equal(queueReads(h).length, 2);
+    assert.deepEqual(clock.delays(), []);
+    assertQueueReadsOnly(h);
+});
+
+for (const kind of ['network', 'timeout', 'http']) {
+    test(`failed ${kind} action does not queue a refresh or retry the mutation`, async t => {
+        const h = setup(t, sharedStorage(), {deferJobs:true, deferActions:true}), clock = queueClock(h);
+        await respondQueueRead(h, 0, {});
+        h.shadow.querySelector('[data-toggle]').click();
+        h.shadow.querySelector('[data-pause]').click(); await h.settle();
+        const request = actionPosts(h)[0];
+        if (kind === 'http') await respondAction(h, 0, 503);
+        else { request[kind === 'timeout' ? 'ontimeout' : 'onerror'](); await h.settle(); }
+        assert.match(h.shadow.querySelector('[data-message]').textContent, /Action refused|Helper asleep|Helper did not respond/);
+        assert.equal(h.shadow.querySelector('[data-toggle]').textContent, 'Downloads !');
+        await respondQueueRead(h, 1, {});
+        assert.equal(queueReads(h).length, 2, 'failed actions do not invalidate the outstanding read');
+        assert.deepEqual(clock.delays(), []);
+        assert.equal(actionPosts(h).length, 1);
+        assert.equal(h.downloads.length, 0);
+    });
+}
+
+test('a failed action cannot cancel a successful action awaiting fresh status', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true, deferActions:true}), clock = queueClock(h);
+    await respondQueueRead(h, 0, {});
+    h.shadow.querySelector('[data-toggle]').click();
+    h.shadow.querySelector('[data-pause]').click(); h.shadow.querySelector('[data-connect]').click();
+    await h.settle();
+    await respondAction(h, 0); await respondAction(h, 1, 503);
+    await respondQueueRead(h, 1, {});
+    assert.equal(queueReads(h).length, 3);
+    await respondQueueRead(h, 2, {paused:true});
+    assert.equal(h.shadow.querySelector('[data-pause]').textContent, 'Resume queue');
+    assert.deepEqual(clock.delays(), []);
+});
+
+for (const kind of ['network', 'timeout', 'http', 'malformed']) {
+    test(`action refresh survives ${kind} read failures, recovers, and returns to idle`, async t => {
+        const h = setup(t, sharedStorage(), {deferJobs:true}), clock = queueClock(h);
+        await respondQueueRead(h, 0, {});
+        h.shadow.querySelector('[data-toggle]').click();
+        h.shadow.querySelector('[data-pause]').click(); await h.settle();
+        h.shadow.querySelector('[data-close]').click();
+        async function fail(index) {
+            const request = queueReads(h)[index];
+            if (kind === 'network') request.onerror();
+            else if (kind === 'timeout') request.ontimeout();
+            else request.onload({status:kind === 'http' ? 503 : 200, responseText:kind === 'http' ? '{"error":"Unavailable"}' : '{'});
+            await h.settle();
+        }
+        await fail(1);
+        assert.equal(queueReads(h).length, 3, 'the failed pre-action read still drains the pending refresh');
+        assert.deepEqual(clock.delays(), []);
+        await fail(2);
+        assert.deepEqual(clock.delays(), [1500], 'the failed action refresh retains a bounded observation retry');
+        await clock.tick(1500); await fail(3);
+        assert.deepEqual(clock.delays(), [3000]);
+        await clock.tick(3000);
+        await respondQueueRead(h, 4, {paused:true, idle_remaining:180});
+        assert.equal(h.shadow.querySelector('[data-pause]').textContent, 'Resume queue');
+        assert.equal(h.shadow.querySelector('[data-pairing-status]').textContent, 'Connected to local helper');
+        assert.deepEqual(clock.delays(), [], 'an idle collapsed helper gets no further requests');
+        assert.equal(actionPosts(h).length, 1, 'recovery never repeats the action');
+        assert.equal(h.downloads.length, 0);
+    });
+}
+
+test('action refresh retries stop after four attempts and a later action can recover', async t => {
+    const h = setup(t, sharedStorage(), {deferJobs:true}), clock = queueClock(h);
+    await respondQueueRead(h, 0, {});
+    h.shadow.querySelector('[data-pause]').click(); await h.settle();
+    queueReads(h)[1].onerror(); await h.settle();
+    let index = 2;
+    for (const delay of [1500, 3000, 6000, 12000]) {
+        assert.deepEqual(clock.delays(), [delay]);
+        await clock.tick(delay);
+        queueReads(h)[index++].onerror(); await h.settle();
+    }
+    assert.equal(queueReads(h).length, 6, 'initial discovery plus failed refresh and four retries');
+    assert.deepEqual(clock.delays(), []);
+    h.w.dispatchEvent(new h.w.PageTransitionEvent('pagehide', {persisted:true}));
+    h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
+    await h.settle();
+    assert.equal(queueReads(h).length, 6, 'restoration does not replenish exhausted action retries');
+    h.shadow.querySelector('[data-pause]').click(); await h.settle();
+    queueReads(h)[6].onerror(); await h.settle();
+    assert.deepEqual(clock.delays(), [1500], 'a new successful action gets its own bounded refresh budget');
+    await clock.tick(1500); await respondQueueRead(h, 7, {paused:true});
+    assert.deepEqual(clock.delays(), []);
+    assert.equal(actionPosts(h).length, 2);
+    assert.equal(h.downloads.length, 0);
+});
+
+test('remote acknowledgment survives a stale action response and a fresh failure still alerts', async t => {
+    const storage = sharedStorage({[ALERTS_SINCE_KEY]:50});
+    const a = setup(t, storage), b = setup(t, storage, {deferJobs:true}), clock = queueClock(b);
+    await showFailures(a, [failure('same', 100)]);
+    await respondQueueRead(b, 0, {jobs:[failure('same', 100)]});
+    b.shadow.querySelector('[data-toggle]').click();
+    b.shadow.querySelector('[data-history-jobs] button').click(); await b.settle();
+    b.shadow.querySelector('[data-close]').click();
+    reviewHistory(a); storage.flush();
+    const button = b.shadow.querySelector('[data-toggle]');
+    await respondQueueRead(b, 1, {jobs:[failure('same', 120)]});
+    assert.equal(button.classList.contains('needs-attention'), false, 'a superseded response cannot raise stale failure attention');
+    await respondQueueRead(b, 2, {jobs:[failure('same', 130)]});
+    assert.equal(button.classList.contains('needs-attention'), true);
+    assert.match(button.textContent, /1 to check/);
+    assert.deepEqual(storage.get(SEEN_KEY), {same:100});
+    assert.deepEqual(clock.delays(), []);
+});
+
 test('startup discovery still renders before polling begins without starting a polling loop', async t => {
     const h = setup(t, sharedStorage(), {deferJobs:true});
     const clock = queueClock(h), button = h.shadow.querySelector('[data-toggle]');
@@ -1101,6 +1319,39 @@ for (const lifecycle of ['visibility', 'bfcache']) {
             Object.defineProperty(h.w.document, 'hidden', {configurable:true, value:false});
             h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));
         } else h.w.dispatchEvent(new h.w.PageTransitionEvent('pageshow', {persisted:true}));
+    }
+
+    for (const pendingRead of [false, true]) {
+        test(`${lifecycle}: successful action while suspended retains refresh ${pendingRead ? 'behind a pending read' : 'without a running read'}`, async t => {
+            const h = setup(t, sharedStorage(), {deferJobs:true, deferActions:true}), clock = queueClock(h);
+            await respondQueueRead(h, 0, {});
+            if (pendingRead) {
+                h.shadow.querySelector('[data-toggle]').click();
+                h.shadow.querySelector('[data-close]').click();
+            }
+            h.shadow.querySelector('[data-pause]').click(); await h.settle();
+            suspend(h);
+            await respondAction(h, 0);
+            if (pendingRead) await respondQueueRead(h, 1, {idle_remaining:0});
+            const before = queueReads(h).length;
+            assert.equal(before, pendingRead ? 2 : 1);
+            assert.deepEqual(clock.delays(), []);
+            restore(h); restore(h); await h.settle();
+            assert.equal(queueReads(h).length, before + 1, 'restoration drains one fresh read even while collapsed');
+            queueReads(h)[before].onerror(); await h.settle();
+            assert.deepEqual(clock.delays(), [1500]);
+            suspend(h); restore(h); await h.settle();
+            queueReads(h)[before + 1].onerror(); await h.settle();
+            assert.deepEqual(clock.delays(), [3000], 'restoration must not reset action recovery attempts');
+            await clock.tick(3000);
+            await respondQueueRead(h, before + 2, {paused:true, idle_remaining:180});
+            assert.equal(h.shadow.querySelector('[data-pause]').textContent, 'Resume queue');
+            assert.deepEqual(clock.delays(), []);
+            suspend(h); restore(h); await h.settle();
+            assert.equal(queueReads(h).length, before + 3, 'idle restoration does not restart polling');
+            assert.equal(actionPosts(h).length, 1);
+            assert.equal(h.downloads.length, 0);
+        });
     }
 
     test(`${lifecycle}: late startup discovery cannot replace active state while suspended`, async t => {

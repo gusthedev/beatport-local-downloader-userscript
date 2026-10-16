@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.15
+// @version      2.0.16
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.15';
+    const CORE_VERSION = '2.0.16';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -542,7 +542,7 @@
                 recordSubmission(media);
                 setFeedback(icon, true);
                 queueMessage('Queued');
-                pollQueue();
+                refreshQueueAfterAction();
             }).catch(error => {
                 instance.recentJobs.delete(mediaKey(media));
                 setFeedback(icon, false);
@@ -925,6 +925,7 @@
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
     let queuePollStarted = false;
+    let queueRefreshPending = false;
     let queueRetryPending = false, queueRetryAttempt = 0;
     let queuePageHidden = false;
     let pairingRequestedAt = 0;
@@ -1192,25 +1193,31 @@
         if (!queuePanel || document.hidden || queuePageHidden) return;
         // A collapsed queue still observes active work for new failures. An
         // idle collapsed queue must not start a permanent polling loop.
-        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork() || queueRetryPending) pollQueue();
+        if (!queuePanel.querySelector('[data-panel]').hidden || queueHasActiveWork() || queueRetryPending || queueRefreshPending) pollQueue();
     }
 
     async function pollQueue() {
         window.clearTimeout(queuePollTimer);
         if (queuePolling || !queuePanel || document.hidden || queuePageHidden) return;
         queuePolling = true;
+        const refreshAfterAction = queueRefreshPending;
+        queueRefreshPending = false;
+        // A successful action during this read requires a later snapshot.
+        const isCurrent = () => !queueRefreshPending;
         // Polls are single-flight. Once one starts, startup discovery can no
         // longer publish queue or connection state, even if this poll fails.
         queuePollStarted = true;
         try {
-            const snapshot = await helperRequest('/jobs');
+            const snapshot = await helperRequest('/jobs', undefined, isCurrent);
+            if (!isCurrent()) return;
             queueRetryPending = false;
             queueRetryAttempt = 0;
             renderQueue(snapshot);
         } catch (error) {
-            // Keep only the intent to observe previously active work, not a
-            // stale snapshot. Bound retries so an unavailable helper can rest.
-            queueRetryPending = (queueHasActiveWork() || queueRetryPending) && queueRetryAttempt < QUEUE_RETRY_DELAYS.length;
+            if (!isCurrent()) return;
+            // Keep the intent to observe active work or a successful action,
+            // not a stale snapshot. Bound retries so an unavailable helper can rest.
+            queueRetryPending = (refreshAfterAction || queueHasActiveWork() || queueRetryPending) && queueRetryAttempt < QUEUE_RETRY_DELAYS.length;
             if (queueRetryPending) queueRetryAttempt++;
             queueLastSnapshot = null;
             queueSleepAt = 0;
@@ -1219,6 +1226,9 @@
             queueMessage(error.message);
         } finally {
             queuePolling = false;
+            // Coalesce actions completed during the read into one fresh GET.
+            // Suspension retains this intent until observation can resume.
+            if (!document.hidden && !queuePageHidden && queueRefreshPending) return pollQueue();
             if (!document.hidden && !queuePageHidden && queueRetryPending) {
                 queuePollTimer = window.setTimeout(pollQueue, QUEUE_RETRY_DELAYS[queueRetryAttempt - 1]);
             }
@@ -1231,8 +1241,14 @@
         }
     }
 
+    function refreshQueueAfterAction() {
+        queueRefreshPending = true;
+        queueRetryAttempt = 0;
+        return pollQueue();
+    }
+
     async function panelAction(path, data = {}) {
-        try { await queueAPI(path, data); await pollQueue(); }
+        try { await queueAPI(path, data); await refreshQueueAfterAction(); }
         catch (error) { queueMessage(error.message, true); }
     }
 
@@ -1262,7 +1278,7 @@
             const result = await queueAPI('/account', { username, password });
             if (!result.saved) throw new Error('Account update was not confirmed. Update the local helper and try again.');
             feedback.textContent = 'Saved for both download modes. The next download signs in again; failed jobs were not retried. Your website login is unchanged.';
-            await pollQueue();
+            await refreshQueueAfterAction();
         } catch (error) {
             feedback.textContent = error.message;
         } finally {
@@ -1373,7 +1389,7 @@
         });
         find('[data-wake]').addEventListener('click', () => {
             if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); queueMessage('Click Pair this browser for automatic setup.', true); return; }
-            wakeQueue().then(() => helperRequest('/resume', {})).then(pollQueue).catch(error => queueMessage(error.message, true));
+            wakeQueue().then(() => helperRequest('/resume', {})).then(refreshQueueAfterAction).catch(error => queueMessage(error.message, true));
         });
         find('[data-save]').addEventListener('click', () => {
             const token = find('[data-token]').value.trim();
@@ -1388,7 +1404,7 @@
             const urls = find('[data-links]').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
             if (!urls.length) return queueMessage('Paste at least one Beatport link.', true);
             queueAPI('/jobs', { urls, mode: loaderConfig.localOnly ? 'local' : 'library' }).then(() => {
-                find('[data-links]').value = ''; queueMessage('List queued'); pollQueue();
+                find('[data-links]').value = ''; queueMessage('List queued'); refreshQueueAfterAction();
             }).catch(error => queueMessage(error.message, true));
         });
         // Typing in our controls must not trigger Beatport's keyboard player shortcuts.
@@ -1413,7 +1429,7 @@
         // Discover an already-awake helper without launching anything. This
         // avoids app prompts just because a new Beatport page was opened.
         if (loaderConfig.getHelperToken?.()) {
-            const isCurrent = () => !queuePollStarted;
+            const isCurrent = () => !queuePollStarted && !queueRefreshPending;
             helperRequest('/jobs', undefined, isCurrent).then(snapshot => {
                 if (isCurrent()) renderQueue(snapshot);
             }).catch(() => {});

@@ -12,9 +12,11 @@ Core 2.0.14 restores **✓ downloaded** marks from the helper's saved completed-
 
 Core 2.0.15 retains the latest download revision observed while a record read is in progress, then fetches it if still needed—even when the queue has become idle. Overlapping observations are coalesced, and records already received or cached by another tab avoid an extra read. Synchronization adds no timers or helper wake-ups; failed reads preserve checkmarks and can recover on a later normal queue observation.
 
+Core 2.0.16 retains a status refresh after successful queue actions, including Retry, Pause/Resume, and Clear History, even if a status request is already running. Overlapping actions share a fresh read after the outstanding request finishes; superseded responses cannot replace queue status. Hidden or suspended pages retain the refresh until restored. Failed actions are not retried automatically.
+
 The shared core turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
-If a status request fails after active work was observed, the panel retries up to four times with delays of 1.5, 3, 6, and 12 seconds, even when collapsed. A successful response resets the retry budget. Hidden or suspended pages pause observation and resume pending retries when restored; restoration does not replenish the budget. Idle queues do not receive these retries, and status checks never wake the helper.
+If a status request fails after active work was observed or while refreshing a successful action, the panel retries up to four times with delays of 1.5, 3, 6, and 12 seconds, even when collapsed. A current successful response or a new successful action resets the retry budget. Hidden or suspended pages pause observation and resume pending retries when restored; restoration does not replenish the budget. Ordinary idle observations do not receive these retries, and status checks never wake the helper.
 
 Startup discovery yields to foreground queue polling as soon as polling begins. A delayed startup response or error cannot replace newer jobs, counts, failure alerts, or helper connection status, including after the queue becomes idle or a foreground request fails.
 
@@ -53,7 +55,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.15** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.16** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -68,7 +70,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.15**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.16**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 
