@@ -22,27 +22,29 @@ try {
         || (runtimeConstant && !/^[A-Z_][A-Z0-9_]*$/.test(runtimeConstant))) {
         throw new Error('Usage: node scripts/check-shared-core-version.cjs <base-sha> <candidate-sha> <core-file> [RUNTIME_CONSTANT]');
     }
-    // CI passes the exact PR base and tested merge commit. Comparing the merged
-    // result avoids treating changes only on main as changes in an older PR.
+    // CI passes the exact PR base and tested merge commit, or the push's previous
+    // revision and tip. Comparing the merged result avoids treating changes only
+    // on main as changes in an older PR; push checks cover the whole pushed range.
     // These two shallow snapshots need no merge-base/history walk.
     const read = ref => execFileSync('git', ['show', `${ref}:${core}`], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
     });
     const before = read(base);
     const after = read(candidate);
+    const next = version(after, `${core} at candidate commit`);
+    // Consistency is required even when this change does not touch the core.
+    if (runtimeConstant) {
+        const declarations = [...after.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${runtimeConstant}\\s*=\\s*(['"])([^'"]+)\\1`, 'g'))];
+        if (declarations.length !== 1 || declarations[0][2] !== next) {
+            throw new Error(`${core}: ${runtimeConstant} must match @version ${next}.`);
+        }
+    }
     if (before === after) {
         console.log(`${core}: unchanged; no shared-core version bump required.`);
     } else {
-        const previous = version(before, `${core} at PR base`);
-        const next = version(after, `${core} at candidate commit`);
+        const previous = version(before, `${core} at base commit`);
         if (previous === next) {
             throw new Error(`${core} changed but @version is still ${next}. Bump the shared-core version; leave unchanged loaders alone.`);
-        }
-        if (runtimeConstant) {
-            const declarations = [...after.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${runtimeConstant}\\s*=\\s*(['"])([^'"]+)\\1`, 'g'))];
-            if (declarations.length !== 1 || declarations[0][2] !== next) {
-                throw new Error(`${core}: ${runtimeConstant} must match @version ${next}.`);
-            }
         }
         console.log(`${core}: @version ${previous} -> ${next}.`);
     }
