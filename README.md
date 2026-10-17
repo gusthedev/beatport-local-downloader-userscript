@@ -97,7 +97,7 @@ Use Node.js **24.19.0** to match CI. The jsdom 30.1.2 development dependency req
 
 Run `npm ci` followed by `npm test`. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
 
-Pull requests that change `beatport-local-hazel.user.js` must change its semantic `@version` relative to the PR base. Keep `CORE_VERSION` equal to `@version`. CI compares the tested PR merge result with its exact base, fetching only that base at depth one; dependency-only (including Dependabot), workflow-only, documentation-only, and loader-only changes do not require a core bump. Only bump a loader version when that loader changes.
+Changes to `beatport-local-hazel.user.js` must change its semantic `@version` relative to the PR base or the previous main revision. Keep `CORE_VERSION` equal to `@version`; CI enforces this consistency even when the core is unchanged. CI compares the tested PR merge result with its exact base, or the main push tip with the push's previous revision, fetching only that base at depth one. Dependency-only (including Dependabot), workflow-only, documentation-only, and loader-only changes do not require a core bump. Only bump a loader version when that loader changes.
 
 To run the same check locally with the base and candidate commits available locally (CI uses the PR merge commit as the candidate):
 
