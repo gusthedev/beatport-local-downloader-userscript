@@ -16,6 +16,8 @@ Core 2.0.16 retains a status refresh after successful queue actions, including R
 
 Core 2.0.17 supports both Beatport table layouts and the current player landmark, while retaining the older player fallback. Track, artist, and label actions stay beside metadata, outside artwork, waveform, and playback controls. Saved checkmarks apply to both rows and the player. Partial row updates and nested marquee text are reconciled without duplicate controls; recycled now-playing links cannot inherit another track's temporary feedback. Download-button pointer events and Enter/Space activation do not also trigger row or player shortcuts; normal player controls and the Safari 27 buffering fix are unchanged.
 
+Core 2.0.18 excludes decorative scrolling-text copies from download actions and accessible names. Where download buttons sit inside a marquee, names truncate to fit while buttons stay stationary and visible; full names remain in the links' tooltips. Artwork, waveform, player controls, and marquees without download actions are unchanged.
+
 The shared core turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
 If a status request fails after active work was observed or while refreshing a successful action, the panel retries up to four times with delays of 1.5, 3, 6, and 12 seconds, even when collapsed. A current successful response or a new successful action resets the retry budget. Hidden or suspended pages pause observation and resume pending retries when restored; restoration does not replenish the budget. Ordinary idle observations do not receive these retries, and status checks never wake the helper.
@@ -57,7 +59,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.17** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.18** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -72,7 +74,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.17**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.18**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 

@@ -238,6 +238,41 @@ test('nested headings still reconcile after row-scoped mutation batching', async
  await h.settle(); h.w.document.querySelector('h1 span').firstChild.data='renamed';
  await h.settle(); assert.match(h.w.document.querySelector('h1 + button').title,/renamed/);
 });
+
+test('scrolling metadata never duplicates actions or names and keeps buttons outside ellipsized text', async t => {
+ const h=setup(t,new Map([['beatport.downloaded.v1.artist:456',Date.now()]]),false,{
+  html:`<main></main><div data-testid="bp-player">
+   <div class="Player_titleRow__fixture"><a href="/track/test/123"><div data-testid="marquee-parent">
+    <div>Track Original Mix</div><div data-testid="marquee-pseudo">Track Original Mix</div></div></a></div>
+   <div data-testid="marquee-parent" id="artists"><div class="Marquee-style__MarqueeElement-fixture"><div class="Player_artists__fixture">
+    <a href="/artist/first/456">First artist with a long name</a>, <a href="/artist/second/789">Second artist with a long name</a>
+   </div></div></div><canvas></canvas><button aria-label="Play">Play</button></div>`,
+  url:'https://www.beatport.com/genre/house/5'
+ });
+ await h.settle();
+ const artists=h.w.document.getElementById('artists'),original=artists.firstElementChild;
+ // Beatport creates its marquee copy after measuring text, potentially after
+ // our first pass. Test copies with existing DOM controls as well as new text.
+ const copy=original.cloneNode(true);copy.dataset.testid='marquee-pseudo';artists.appendChild(copy);
+ await h.settle();
+ assert.equal(copy.querySelectorAll('button').length,0);
+ assert.equal(artists.querySelectorAll('button').length,2);
+ assert.equal(original.querySelector('button').textContent,'✓');
+ assert(artists.classList.contains('tm-beatportdl-action-marquee'));
+ assert.equal(h.w.getComputedStyle(copy).display,'none');
+ assert.equal(h.w.getComputedStyle(original).animation,'none');
+ for(const a of original.querySelectorAll('a')) {
+  assert.equal(h.w.getComputedStyle(a).textOverflow,'ellipsis');
+  assert.equal(a.nextElementSibling.tagName,'BUTTON','action is outside truncated link');
+ }
+ const title=h.w.document.querySelector('[data-tm-beatport-media-key="track:123"]');
+ assert.equal(title.title.match(/Track Original Mix/g).length,1);
+ assert.equal(h.w.getComputedStyle(h.w.document.querySelector('canvas')).display,'inline');
+ original.querySelectorAll('a').forEach(a=>a.href='/genre/house/5');
+ await h.settle();
+ assert.equal(artists.querySelectorAll('button').length,0);
+ assert.equal(artists.classList.contains('tm-beatportdl-action-marquee'),false,'styles released with actions');
+});
 test('recent submissions require confirmation while Shift-click still copies without a job',async t=>{
  const h=setup(t);await h.settle();let confirms=0,clickedDownloads=0,copied='';
  h.w.confirm=message=>{confirms++;assert.match(message,/last 90 days/);return false;};h.w.GM_setClipboard=value=>{copied=value;};
