@@ -115,6 +115,26 @@ test('download cache learns list downloads and merges separate browser tabs with
     assert.equal(link.nextElementSibling.textContent,'✓','later DOM/navigation also uses cached ID records');
 });
 
+for (const succeeds of [true, false]) {
+    test(`a late ${succeeds ? 'accepted' : 'failed'} job cannot change a recycled track button`, async t => {
+        const storage=sharedStorage(),h=setup(t,storage,{deferActions:true});
+        await h.settle();
+        const link=h.w.document.querySelector('article a'),icon=link.nextElementSibling;
+        icon.click();await h.settle();
+        const request=h.requests.find(r=>r.method==='POST'&&r.url.endsWith('/jobs'));
+        assert(request);
+        link.href='/track/next/456';link.textContent='Next track';
+        await new Promise(resolve=>h.w.requestAnimationFrame(resolve));await h.settle();
+        assert.equal(icon.disabled,false); assert.equal(icon.textContent,'⇩');
+        request.onload({status:succeeds?200:400,responseText:JSON.stringify(succeeds?{accepted:true}:{error:'Fixture rejection'})});
+        await h.settle();
+        assert.equal(icon.disabled,false); assert.equal(icon.textContent,'⇩');
+        assert.equal(icon.dataset.tmBeatportMediaKey,'track:456');
+        assert.equal(Boolean(storage.get('beatport.submitted.v1.track:123')),succeeds);
+        assert.equal(storage.get('beatport.submitted.v1.track:456'),undefined);
+    });
+}
+
 test('submissions, failures, partial transfers, and malformed records cannot claim completion', async t => {
     const h=setup(t),stamp=Date.now(),hooks=h.w.__TM_BEATPORTDL_TEST_HOOKS__;
     hooks.recordSubmission({type:'track',id:'123'});
