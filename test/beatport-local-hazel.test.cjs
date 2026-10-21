@@ -105,12 +105,9 @@ function classList() {
 }
 
 function createContext({ confirmResult = true, localOnly = false } = {}) {
-    const downloads = [];
     const copied = [];
-    const revoked = [];
     const timers = new Map();
     let nextTimer = 1;
-    let nextObjectUrl = 1;
 
     class TestElement {
         constructor(tagName = 'DIV') {
@@ -122,14 +119,9 @@ function createContext({ confirmResult = true, localOnly = false } = {}) {
     class TestAnchor extends TestElement {
         constructor() { super('A'); }
     }
-    class TestURL extends URL {}
-    TestURL.createObjectURL = () => `blob:test-${nextObjectUrl++}`;
-    TestURL.revokeObjectURL = (value) => revoked.push(value);
-
     const documentElement = {
         appendChild(element) {
             element.isConnected = true;
-            if (element.tagName === 'A') downloads.push(element);
         },
     };
     const document = {
@@ -152,10 +144,9 @@ function createContext({ confirmResult = true, localOnly = false } = {}) {
         },
     };
     const context = {
-        Blob,
         Element: TestElement,
         HTMLAnchorElement: TestAnchor,
-        URL: TestURL,
+        URL,
         BEATPORTDL_CONFIG: { localOnly },
         __TM_BEATPORTDL_TEST_MODE__: { skipStart: true },
         cancelAnimationFrame: () => {},
@@ -177,9 +168,7 @@ function createContext({ confirmResult = true, localOnly = false } = {}) {
     return {
         context,
         copied,
-        downloads,
         hooks: context.__TM_BEATPORTDL_TEST_HOOKS__,
-        revoked,
         timers,
     };
 }
@@ -274,49 +263,12 @@ test('singleton prevents a second initialization in the same page context', () =
     assert.equal(context.__TM_BEATPORTDL_TEST_HOOKS__.instance, firstInstance);
 });
 
-test('Hazel jobs retain the local text-file contract and reject rapid duplicates', () => {
-    const { downloads, hooks, revoked } = createContext();
-    const media = {
-        id: '321',
-        type: 'release',
-        url: 'https://www.beatport.com/release/a-release/321',
-    };
-    const job = hooks.buildHazelJob(media, new Date('2026-08-12T21:22:23.456Z'));
-    assert.deepEqual({ ...job }, {
-        contents: 'https://www.beatport.com/release/a-release/321\n',
-        filename: 'beatportdl-release-321-20260812212223456.txt',
-    });
-
+test('download jobs reject rapid duplicate clicks', () => {
+    const { hooks } = createContext();
+    const media = { type: 'release' };
     assert.equal(hooks.claimJob({ ...media, id: '322' }, 1000), true);
     assert.equal(hooks.claimJob({ ...media, id: '322' }, 1200), false);
     assert.equal(hooks.claimJob({ ...media, id: '322' }, 2500), true);
-
-    const icon = fakeIcon();
-    assert.equal(hooks.createHazelJob(media, icon), true);
-    assert.equal(downloads.length, 1);
-    assert.equal(downloads[0].clicked, true);
-    assert.equal(downloads[0].removed, true);
-    assert.equal(downloads[0].download.startsWith('beatportdl-release-321-'), true);
-    assert.equal(icon.disabled, true);
-    assert.equal(hooks.createHazelJob(media, fakeIcon()), false);
-    hooks.cleanupObjectUrls();
-    assert.deepEqual(revoked, ['blob:test-1']);
-});
-
-test('local-only mode changes only the routing marker in the job filename', () => {
-    const { downloads, hooks } = createContext({ localOnly: true });
-    const media = {
-        id: '654',
-        type: 'track',
-        url: 'https://www.beatport.com/track/a-track/654',
-    };
-    const job = hooks.buildHazelJob(media, new Date('2026-08-12T21:22:23.456Z'));
-    assert.deepEqual({ ...job }, {
-        contents: 'https://www.beatport.com/track/a-track/654\n',
-        filename: 'beatportdl-localonly-track-654-20260812212223456.txt',
-    });
-    assert.equal(hooks.createHazelJob(media, fakeIcon()), true);
-    assert.equal(downloads[0].download.startsWith('beatportdl-localonly-track-654-'), true);
 });
 
 test('stale buttons are replaced so an older click handler cannot keep control', () => {

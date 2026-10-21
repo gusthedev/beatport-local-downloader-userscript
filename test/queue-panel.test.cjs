@@ -55,14 +55,14 @@ function sharedStorage(initial = {}) {
 function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads = false, deferActions = false} = {}) {
     const dom = new JSDOM('<main><h1>Track</h1><article><a href="/track/example/123">Example</a></article><button id="player">Play</button></main>',
         { url:'https://www.beatport.com/track/example/123',runScripts:'outside-only',pretendToBeVisual:true });
-    const w = dom.window, requests = [], downloads = [];
+    const w = dom.window, requests = [], downloads = [], revoked = [];
     let shadow, local = false, modeChange, snapshot = {jobs:[],active:false,paused:false,venus:false};
     let downloadRecords = {revision:'a'.repeat(64),downloads:[]};
     const attach = w.Element.prototype.attachShadow;
     w.Element.prototype.attachShadow = function(options) { shadow = attach.call(this, options); return shadow; };
     w.Range.prototype.getClientRects = () => [];
     w.URL.createObjectURL = () => 'blob:fixture';
-    w.URL.revokeObjectURL = () => {};
+    w.URL.revokeObjectURL = value => revoked.push(value);
     w.HTMLAnchorElement.prototype.click = function() { downloads.push({href:this.href,download:this.download}); };
     w.BEATPORTDL_CONFIG = {helperEnabled:true,getHelperToken:()=> 'a'.repeat(64),setHelperToken(){},
         get localOnly(){return local;},setLocalOnly(value){local=value;modeChange?.();},onModeChange(fn){modeChange=fn;}};
@@ -78,7 +78,7 @@ function setup(t, storage = sharedStorage(), {deferJobs = false, deferDownloads 
     w.__TM_BEATPORTDL_TEST_MODE__ = {};
     w.eval(source);
     t.after(()=>{storageTab.detach();w.__TM_BEATPORTDL_TEST_HOOKS__.instance.observer.disconnect();w.close();});
-    return {w,shadow,requests,downloads,storageTab,setDownloads(value){downloadRecords=value;},setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
+    return {w,shadow,requests,downloads,revoked,storageTab,setDownloads(value){downloadRecords=value;},setSnapshot(value){snapshot={...snapshot,...value};},async settle(){for(let i=0;i<12;i++)await Promise.resolve();}};
 }
 
 test('confirmed downloads backfill cleared history and survive sleeping helper and new pages', async t => {
@@ -741,13 +741,34 @@ test('panel can move sides and never intercepts keyboard playback outside it', t
     assert.equal(keys,1);
 });
 
-test('direct jobs keep per-click mode and never generate TXT files', async t => {
+for(const localOnly of [false,true]) test(`direct jobs retain ${localOnly?'local':'library'} mode and never generate TXT files`, async t => {
     const h=setup(t);h.shadow.querySelector('[data-toggle]').click();await h.settle();
-    h.w.BEATPORTDL_CONFIG.setLocalOnly(true);
-    h.w.document.querySelector('article button').click();await h.settle();
+    h.w.BEATPORTDL_CONFIG.setLocalOnly(localOnly);
+    assert.equal(h.shadow.querySelector('[data-mode]').value,localOnly?'local':'library');
+    const icon=h.w.document.querySelector('article button');icon.click();icon.click();
+    // A destination change while the helper responds only affects later jobs.
+    h.w.BEATPORTDL_CONFIG.setLocalOnly(!localOnly);await h.settle();
     const post=h.requests.find(r=>r.method==='POST');assert(post);
-    assert.equal(JSON.parse(post.data).mode,'local');assert.equal(JSON.parse(post.data).urls[0],'https://www.beatport.com/track/example/123');
+    assert.equal(h.requests.filter(r=>r.method==='POST').length,1);
+    assert.equal(JSON.parse(post.data).mode,localOnly?'local':'library');assert.equal(JSON.parse(post.data).urls[0],'https://www.beatport.com/track/example/123');
     assert.equal(post.headers.Authorization,'Bearer '+'a'.repeat(64));assert.equal(h.downloads.length,0);
+});
+
+test('sleeping helper uses one Hazel wake file before direct submission and releases its URL', async t=>{
+    const h=setup(t);await h.settle();const clock=queueClock(h);
+    const respond=h.w.GM_xmlhttpRequest;let awake=false;
+    h.w.GM_xmlhttpRequest=request=>request.url.endsWith('/health')&&!awake?request.onerror():respond(request);
+    h.w.document.querySelector('article button').click();
+    h.shadow.querySelector('[data-wake]').click();await h.settle();
+    assert.equal(h.downloads.length,1,'concurrent wake requests share one file');
+    assert.match(h.downloads[0].download,/^beatportdl-wake-\d+\.txt$/);
+    assert.equal(h.requests.filter(r=>r.method==='POST').length,0);
+    awake=true;await clock.tick(1000);
+    assert.equal(h.requests.filter(r=>r.method==='POST'&&r.url.endsWith('/jobs')).length,1);
+    assert.equal(h.downloads.length,1,'no per-track TXT after wake');
+    h.w.__TM_BEATPORTDL_TEST_HOOKS__.cleanupObjectUrls();
+    assert.deepEqual(h.revoked,['blob:fixture']);
+    assert(!clock.delays().includes(10000),'URL cleanup timer is cancelled');
 });
 
 test('untrusted job titles are text and successful delivery does not claim Music import', async t => {
@@ -945,7 +966,7 @@ for (const [name, selector, endpoint, initial, fresh] of [
         h.shadow.querySelector('[data-account-password]').value = 'fixture';
         h.shadow.querySelector('[data-toggle]').click();
         if (selector) h.shadow.querySelector(selector).click();
-        else h.w.__TM_BEATPORTDL_TEST_HOOKS__.createHazelJob(
+        else h.w.__TM_BEATPORTDL_TEST_HOOKS__.submitDownloadJob(
             {type:'track', id:'123', url:'https://www.beatport.com/track/example/123'}, h.w.document.createElement('button'));
         await h.settle();
         h.shadow.querySelector('[data-close]').click();

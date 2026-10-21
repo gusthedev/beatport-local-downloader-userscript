@@ -1,6 +1,6 @@
 # Beatport Local Download Userscript
 
-This repository contains the public browser side of a local Beatport download queue. With loader 1.6.3, the browser sends jobs directly to a privately paired on-demand helper. Hazel only wakes a sleeping helper using one temporary trigger; old loaders retain the legacy TXT workflow.
+This repository contains the public browser side of a local Beatport download queue. Loader **1.6.3 or newer is required**: the browser sends jobs directly to a privately paired on-demand helper. Hazel only wakes a sleeping helper using one temporary trigger. The old browser-generated per-download TXT workflow has been retired; manually supplied TXT batches and retry files remain supported by the local queue.
 
 ## Live queue panel
 
@@ -14,9 +14,11 @@ Core 2.0.15 retains the latest download revision observed while a record read is
 
 Core 2.0.16 retains a status refresh after successful queue actions, including Retry, Pause/Resume, and Clear History, even if a status request is already running. Overlapping actions share a fresh read after the outstanding request finishes; superseded responses cannot replace queue status. Hidden or suspended pages retain the refresh until restored. Failed actions are not retried automatically.
 
-Core 2.0.17 supports both Beatport table layouts and the current player landmark, while retaining the older player fallback. Track, artist, and label actions stay beside metadata, outside artwork, waveform, and playback controls. Saved checkmarks apply to both rows and the player. Partial row updates and nested marquee text are reconciled without duplicate controls; recycled now-playing links cannot inherit another track's temporary feedback. Download-button pointer events and Enter/Space activation do not also trigger row or player shortcuts; normal player controls and the Safari 27 buffering fix are unchanged.
+Track, artist, and label actions stay beside metadata, outside artwork, waveform, and playback controls. Saved checkmarks apply to both rows and the player. Partial row updates and nested marquee text are reconciled without duplicate controls; recycled now-playing links cannot inherit another track's temporary feedback. Download-button pointer events and Enter/Space activation do not also trigger row or player shortcuts; normal player controls and the Safari 27 buffering fix are unchanged.
 
 Core 2.0.18 excludes decorative scrolling-text copies from download actions and accessible names. Where download buttons sit inside a marquee, names truncate to fit while buttons stay stationary and visible; full names remain in the download-button tooltips. Artwork, waveform, player controls, and marquees without download actions are unchanged.
+
+Core **2.0.19** retires the old per-download TXT path, bottom destination toggle, and obsolete `Player-style`, `TrackRow`, `TableRow`, and `ListItem` class fallbacks. The current shared rows were checked on track, release, artist, label, chart, and public-playlist pages. Stable player landmarks and normal semantic list/row elements remain supported. Older/incomplete loaders fail with an explicit update instruction before controls are added. Safari 27 buffering, cached-core rollback, saved checkmarks, Hazel wake/pairing files, and the local queue's manual TXT/retry intake are unchanged.
 
 The shared core turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
@@ -49,7 +51,7 @@ The existing TXT batch/retry workflow remains supported by the local queue. Brow
 - Shows queue-accepted/copied feedback and confirms potentially large artist or label catalog jobs by default.
 - Confirmed downloads show **✓** permanently and ask before downloading again. Recently submitted but unconfirmed items show **↻**, not a completed checkmark; that separate resubmission reminder lasts 90 days. Submission cleanup never deletes confirmed-download marks. Previously expired submission markers are not recreated, but saved completed jobs rebuild confirmed marks regardless of age or History visibility.
 - Processes repeated row links once per batch and limits title-control work to relevant changes.
-- Provides a visible, persistent local-only toggle synchronized with the loader menu. Local automation can route those marked jobs to an isolated folder instead of its normal library-ingest workflow.
+- Provides a destination selector in the queue panel synchronized with the loader menu. Each job retains the destination selected when it was submitted.
 - On Safari 27 only, selects standard MediaSource buffering for Beatport's signed-in HLS player to prevent seeks beyond the buffered audio from freezing. Chrome and other browser versions are untouched; no browser security or privacy settings are changed.
 
 ## Installation
@@ -59,7 +61,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.18** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.19** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -74,7 +76,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.18**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.19**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 
@@ -99,7 +101,7 @@ The repository contains no Beatport username, password, pairing tokens, personal
 
 Use Node.js **24.19.0** to match CI. The jsdom 30.1.3 development dependency requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`; the root package declares the same supported range.
 
-Run `npm ci` followed by `npm test`. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, Hazel job format, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
+Run `npm ci` followed by `npm test`. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, current page rows/player landmarks, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, loader requirements, direct queue submissions, Hazel wake/pairing files, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
 
 Changes to `beatport-local-hazel.user.js` must change its semantic `@version` relative to the PR base or the previous main revision. Keep `CORE_VERSION` equal to `@version`; CI enforces this consistency even when the core is unchanged. CI compares the tested PR merge result with its exact base, or the main push tip with the push's previous revision, fetching only that base at depth one. Dependency-only (including Dependabot), workflow-only, documentation-only, and loader-only changes do not require a core bump. Only bump a loader version when that loader changes.
 
