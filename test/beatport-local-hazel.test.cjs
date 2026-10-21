@@ -382,6 +382,7 @@ test('chooses one best text link for repeated media within a row', () => {
         querySelector: () => null,
         querySelectorAll: () => [],
         closest(selector) {
+            if (selector === '[data-testid="marquee-pseudo"]') return null;
             return selector.includes('main') ? { nodeType: 1 } : item;
         },
     });
