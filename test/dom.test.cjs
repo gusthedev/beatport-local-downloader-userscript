@@ -155,6 +155,89 @@ test('unrelated player changes do not reconcile the title control',async t=>{
  h.w.document.querySelector=s=>{if(s.includes('h1'))headingQueries++;return q(s);};
  q('#clock').firstChild.data='1';await h.settle();assert.equal(headingQueries,0);
 });
+
+// Both table variants observed during Beatport's layout rollout. The player
+// landmark is shared by the current variants; older Player-style builds remain
+// supported. Hashed class suffixes deliberately differ from the live site.
+for (const [layout, rowClass, playerAttributes, titleMarkup] of [
+ ['legacy', 'Table-style__TableRow-sc-fixture row tracks-table', 'class="Player-style__Player-fixture"', 'Track <span>Original Mix</span>'],
+ ['new', 'Row-style__Stylized-sc-fixture row', 'id="bp-player" data-testid="bp-player" class="Player_wrapper__fixture"', '<div data-testid="marquee-parent"><span>Track</span> <span>Original Mix</span></div>'],
+]) {
+ const html = `<main><div class="${rowClass}"><div class="cell"><a href="/track/test/123">${titleMarkup}</a></div>
+  <div class="cell"><a href="/track/test/123">Track</a></div></div></main>
+  <div ${playerAttributes}><div class="Player_titleRow__fixture"><a href="/track/test/123">${titleMarkup}</a></div>
+  <div class="Player_artists__fixture"><a href="/artist/test/456">Artist</a></div>
+  <span class="Player_label__fixture"><a href="/label/test/789">Label</a></span>
+  <a href="/release/test/999"><img alt="Artwork"></a><canvas></canvas><button aria-label="Play">Play</button></div>
+  <nav><a href="/track/test/123">Unrelated navigation</a></nav>`;
+ test(`${layout} rows and player keep one action per item and restore saved checkmarks offline`, async t => {
+  const storage = new Map([['beatport.downloaded.v1.track:123', Date.now()-365*86400000]]);
+  const h = setup(t, storage, false, {html, url:'https://www.beatport.com/genre/house/5'});
+  await h.settle();
+  const player = h.w.document.querySelector('main + div');
+  const buttons = [...h.w.document.querySelectorAll('.tm-beatportdl-local-icon')];
+  assert.equal(buttons.length, 4, 'one row control plus track, artist and label in player');
+  assert.equal(h.w.document.querySelectorAll('main button').length, 1);
+  assert.equal(player.querySelectorAll('.tm-beatportdl-local-icon').length, 3);
+  assert.equal(player.querySelector('canvas').childNodes.length, 0);
+  assert.equal(h.w.document.querySelector('nav button'), null);
+  for (const button of buttons.filter(b=>b.dataset.tmBeatportMediaKey==='track:123')) {
+   assert.equal(button.textContent, '✓'); assert.match(button.title, /Downloaded/);
+  }
+  h.w.GM_setValue('beatport.downloaded.v1.artist:456', Date.now());
+  assert.equal(player.querySelector('[data-tm-beatport-media-key="artist:456"]').textContent, '✓');
+
+  // React keeps the link but changes the now-playing ID and nested marquee text.
+  const track = player.querySelector('a[href^="/track/"]'), icon = track.nextElementSibling;
+  track.href='/track/next/321'; track.querySelector('span').firstChild.data='Next';
+  await h.settle();
+  assert.equal(track.nextElementSibling, icon);
+  assert.equal(icon.textContent, '⇩');
+  assert.equal(icon.classList.contains('tm-beatportdl-local-downloaded'), false);
+  assert.match(icon.title, /Next/);
+  track.querySelector('span').firstChild.data='Renamed';
+  await h.settle(); assert.match(icon.title, /Renamed/);
+  assert.equal(h.w.document.querySelector('main button').textContent, '✓', 'list mark remains independent');
+
+  // A partial cell update must reconcile the previous winner in another cell.
+  const duplicate = h.w.document.querySelector('main .cell + .cell a');
+  duplicate.textContent='A more descriptive track title with the same ID';
+  await h.settle();
+  assert.equal(h.w.document.querySelectorAll('main button').length, 1);
+  assert.equal(duplicate.nextElementSibling.textContent, '✓');
+  duplicate.parentElement.remove(); await h.settle();
+  assert.equal(h.w.document.querySelector('main button').textContent, '✓');
+ });
+ test(`${layout} download actions do not activate row/player pointer or keyboard shortcuts`, async t => {
+  const h = setup(t, new Map(), false, {html, url:'https://www.beatport.com/genre/house/5'});
+  await h.settle(); let shortcuts=0, copied='';
+  h.w.GM_setClipboard=value=>{copied=value;};
+  for(const type of ['click','pointerdown','pointerup','mousedown','mouseup','dblclick','keydown','keyup']) {
+   h.w.document.addEventListener(type, ()=>shortcuts++);
+  }
+  const icon=h.w.document.querySelector('main + div .tm-beatportdl-local-icon');
+  for(const type of ['pointerdown','pointerup','mousedown','mouseup','dblclick']) icon.dispatchEvent(new h.w.MouseEvent(type,{bubbles:true}));
+  for(const type of ['keydown','keyup']) for(const key of ['Enter',' ']) {
+   const event=new h.w.KeyboardEvent(type,{key,bubbles:true,cancelable:true}); icon.dispatchEvent(event);
+   assert.equal(event.defaultPrevented,false,'native keyboard activation is retained');
+  }
+  icon.dispatchEvent(new h.w.MouseEvent('click',{bubbles:true,shiftKey:true}));
+  assert.equal(copied,'https://www.beatport.com/track/test/123'); assert.equal(shortcuts,0);
+  h.w.document.querySelector('[aria-label="Play"]').click();
+  h.w.document.body.dispatchEvent(new h.w.KeyboardEvent('keydown',{key:' ',bubbles:true}));
+  assert.equal(shortcuts,2,'normal player clicks and page shortcuts are unchanged');
+  // A pending copy/job indicator cannot migrate to another now-playing track.
+  const link=icon.previousElementSibling; link.href='/track/next/321';
+  await h.settle(); assert.equal(icon.disabled,false); assert.equal(icon.textContent,'⇩');
+  assert.equal(icon.classList.contains('tm-beatportdl-local-queued'),false);
+ });
+}
+
+test('nested headings still reconcile after row-scoped mutation batching', async t => {
+ const h=setup(t,new Map(),false,{html:'<main><article><h1>Track <span>name</span></h1></article></main>'});
+ await h.settle(); h.w.document.querySelector('h1 span').firstChild.data='renamed';
+ await h.settle(); assert.match(h.w.document.querySelector('h1 + button').title,/renamed/);
+});
 test('recent submissions require confirmation while Shift-click still copies without a job',async t=>{
  const h=setup(t);await h.settle();let confirms=0,clickedDownloads=0,copied='';
  h.w.confirm=message=>{confirms++;assert.match(message,/last 90 days/);return false;};h.w.GM_setClipboard=value=>{copied=value;};

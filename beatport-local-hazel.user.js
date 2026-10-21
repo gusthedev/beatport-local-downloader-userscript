@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.16
+// @version      2.0.17
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.16';
+    const CORE_VERSION = '2.0.17';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -84,6 +84,11 @@
     const TITLE_ICON_CLASS = 'tm-beatportdl-page-title-icon';
     const TITLE_WRAP_CLASS = 'tm-beatportdl-page-title-wrap';
     const LABEL_PARENT_CLASS = 'tm-beatportdl-label-parent';
+    // Beatport is serving both styled-component tables and CSS-module players.
+    // Prefer its stable player landmark, retaining the previous player fallback.
+    const PLAYER_SELECTOR = '[data-testid="bp-player"], #bp-player, [class*="Player-style__"]';
+    const ROW_SELECTOR = 'tr, li, article, [role="row"], [data-testid*="track" i], '
+        + '[class*="TrackRow"], [class*="TableRow"], [class*="ListItem"], [class*="Row-style__Stylized"]';
     const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const SUBMISSION_PREFIX = 'beatport.submitted.v1.';
@@ -177,7 +182,7 @@
 
     function getEligibleMedia(link) {
         if (!isAnchorNode(link)) return null;
-        if (!link.closest('main') && !link.closest('[class*="Player-style__"]')) return null;
+        if (!link.closest('main') && !link.closest(PLAYER_SELECTOR)) return null;
         return getBeatportMediaUrl(link.getAttribute('href'));
     }
 
@@ -463,6 +468,21 @@
         return createHazelJob(media, icon);
     }
 
+    function bindMediaAction(icon) {
+        icon.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            handleMediaAction(event, icon._tmBeatportMedia, icon);
+        });
+        // Keep native button focus/activation, but do not also play a table row
+        // or toggle the player when Enter/Space activates a download control.
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'keydown', 'keyup']) {
+            icon.addEventListener(type, event => {
+                if (!type.startsWith('key') || event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+            });
+        }
+    }
+
     function updateLabelParent(parent) {
         if (!parent?.classList) return;
         const hasLabelIcon = Array.from(parent.children || []).some((child) => (
@@ -540,12 +560,12 @@
             queueMessage('Sending request…');
             queueAPI('/jobs', { urls: [media.url], mode }).then(() => {
                 recordSubmission(media);
-                setFeedback(icon, true);
+                if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, true);
                 queueMessage('Queued');
                 refreshQueueAfterAction();
             }).catch(error => {
                 instance.recentJobs.delete(mediaKey(media));
-                setFeedback(icon, false);
+                if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, false);
                 queueMessage(error.message, true);
             });
             return true;
@@ -592,10 +612,7 @@
     }
 
     function semanticItem(link) {
-        return link.closest(
-            'tr, li, article, [role="row"], [data-testid*="track" i], '
-            + '[class*="TrackRow"], [class*="TableRow"], [class*="ListItem"]'
-        );
+        return link.closest(ROW_SELECTOR);
     }
 
     function preferredMediaLink(link, media, rowCache = new Map()) {
@@ -638,14 +655,11 @@
             icon.setAttribute(OWNED_ATTRIBUTE, 'link');
             icon.type = 'button';
             icon.textContent = '⇩';
-            icon.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleMediaAction(event, icon._tmBeatportMedia, icon);
-            });
+            bindMediaAction(icon);
             link.insertAdjacentElement('afterend', icon);
         }
 
+        if (icon._tmBeatportMedia && mediaKey(icon._tmBeatportMedia) !== mediaKey(media)) clearFeedback(icon, true);
         icon.classList.toggle('tm-beatportdl-label-icon', media.type === 'label');
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
@@ -775,11 +789,7 @@
             icon.setAttribute(OWNED_ATTRIBUTE, 'page');
             icon.type = 'button';
             icon.textContent = '⇩';
-            icon.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleMediaAction(event, icon._tmBeatportMedia, icon);
-            });
+            bindMediaAction(icon);
             heading.insertAdjacentElement('afterend', icon);
         }
 
@@ -789,6 +799,7 @@
         instance.activeTitleIcon = icon;
         instance.activeTitleParent = parent;
         parent.classList.add(TITLE_WRAP_CLASS);
+        if (icon._tmBeatportMedia && mediaKey(icon._tmBeatportMedia) !== mediaKey(media)) clearFeedback(icon, true);
         icon.dataset.tmBeatportCoreVersion = CORE_VERSION;
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
@@ -811,12 +822,16 @@
     const batcher = createFrameBatcher(flushRoots);
 
     function mutationRoot(node) {
-        if (isElementNode(node) || node === document) return node;
-        return node?.parentElement || null;
+        if (node === document) return node;
+        const element = isElementNode(node) ? node : node?.parentElement;
+        // React can update a nested marquee span or just one cell of a row.
+        // Reconcile the whole semantic row (once per frame), or its owning link,
+        // so deduplication and checkmarks follow recycled links in either layout.
+        return element?.closest?.(ROW_SELECTOR) || element?.closest?.('a[href]') || element || null;
     }
 
     function titleMutation(mutation) {
-        const target = mutationRoot(mutation.target);
+        const target = isElementNode(mutation.target) ? mutation.target : mutation.target?.parentElement;
         if (isOwnedNode(target)) return false;
         if (instance.activeHeading?.contains?.(target) || target?.matches?.('main h1')) return true;
         return [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some(node =>
