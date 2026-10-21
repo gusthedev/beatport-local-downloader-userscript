@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.18
+// @version      2.0.19
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.18';
+    const CORE_VERSION = '2.0.19';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -86,11 +86,10 @@
     const LABEL_PARENT_CLASS = 'tm-beatportdl-label-parent';
     const ACTION_MARQUEE_CLASS = 'tm-beatportdl-action-marquee';
     const MARQUEE_COPY_SELECTOR = '[data-testid="marquee-pseudo"]';
-    // Beatport is serving both styled-component tables and CSS-module players.
-    // Prefer its stable player landmark, retaining the previous player fallback.
-    const PLAYER_SELECTOR = '[data-testid="bp-player"], #bp-player, [class*="Player-style__"]';
+    // Current player landmarks and shared rows across Beatport page types.
+    const PLAYER_SELECTOR = '[data-testid="bp-player"], #bp-player';
     const ROW_SELECTOR = 'tr, li, article, [role="row"], [data-testid*="track" i], '
-        + '[class*="TrackRow"], [class*="TableRow"], [class*="ListItem"], [class*="Row-style__Stylized"]';
+        + '[class*="Row-style__Stylized"]';
     const STATUS_ID = 'tm-beatportdl-status';
     const OWNED_ATTRIBUTE = 'data-tm-beatportdl-owned';
     const SUBMISSION_PREFIX = 'beatport.submitted.v1.';
@@ -104,7 +103,6 @@
     const SUBMISSION_CLEANUP_KEY = 'beatport.submissionCleanup.v1';
     const SUBMISSION_CLEANUP_INTERVAL = 24 * 60 * 60 * 1000;
     let lastSubmissionCleanup = 0;
-    const MODE_ID = 'tm-beatportdl-mode';
     const submissionMemory = new Map();
     const watchedSubmissions = new Map();
     let titleDirty = true;
@@ -384,24 +382,6 @@
         if (typeof GM_setValue === 'function') GM_setValue(SUBMISSION_CLEANUP_KEY, now);
     }
 
-    function reconcileModeControl() {
-        if (loaderConfig.helperEnabled) return;
-        let button = document.getElementById(MODE_ID);
-        if (typeof loaderConfig.setLocalOnly !== 'function') return;
-        if (!button) {
-            button = document.createElement('button');
-            button.id = MODE_ID;
-            button.type = 'button';
-            button.setAttribute(OWNED_ATTRIBUTE, 'mode');
-            button.addEventListener('click', () => loaderConfig.setLocalOnly(!loaderConfig.localOnly));
-            document.documentElement.appendChild(button);
-        }
-        const localOnly = loaderConfig.localOnly === true;
-        button.textContent = localOnly ? 'Downloads: Local only' : 'Downloads: Normal library';
-        button.setAttribute('aria-pressed', String(localOnly));
-        button.title = 'Switch the destination for new download jobs';
-    }
-
     function clearFeedback(icon, reset = false) {
         const timer = instance.feedbackTimers.get(icon);
         if (timer) window.clearTimeout(timer);
@@ -477,7 +457,7 @@
         if (downloaded && !window.confirm('This item was already downloaded. Download again?')) return false;
         if (!downloaded && submissionTime(media) && !window.confirm(`This item was submitted in the last ${SUBMISSION_DAYS} days. Submit again?`)) return false;
         if (!confirmLargeJob(media)) return false;
-        return createHazelJob(media, icon);
+        return submitDownloadJob(media, icon);
     }
 
     function bindMediaAction(icon) {
@@ -532,15 +512,6 @@
         return null;
     }
 
-    function buildHazelJob(media, date = new Date(), localOnly = loaderConfig.localOnly === true) {
-        const timestamp = date.toISOString().replace(/[^0-9]/g, '').slice(0, 17);
-        const prefix = localOnly ? 'beatportdl-localonly' : 'beatportdl';
-        return {
-            contents: `${media.url}\n`,
-            filename: `${prefix}-${media.type}-${media.id}-${timestamp}.txt`,
-        };
-    }
-
     function claimJob(media, now = Date.now()) {
         const key = mediaKey(media);
         const lastQueued = instance.recentJobs.get(key);
@@ -572,54 +543,23 @@
         for (const objectUrl of Array.from(instance.objectUrlTimers.keys())) revokeObjectUrl(objectUrl);
     }
 
-    function createHazelJob(media, icon) {
+    function submitDownloadJob(media, icon) {
         if (!media?.url || !icon || icon.disabled || !claimJob(media)) return false;
-        if (loaderConfig.helperEnabled) {
-            icon.disabled = true;
-            const mode = loaderConfig.localOnly ? 'local' : 'library';
-            ensureQueuePanel();
-            queueMessage('Sending request…');
-            queueAPI('/jobs', { urls: [media.url], mode }).then(() => {
-                recordSubmission(media);
-                if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, true);
-                queueMessage('Queued');
-                refreshQueueAfterAction();
-            }).catch(error => {
-                instance.recentJobs.delete(mediaKey(media));
-                if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, false);
-                queueMessage(error.message, true);
-            });
-            return true;
-        }
-
-        let download = null;
-        let objectUrl = '';
-        try {
-            const job = buildHazelJob(media);
-            const blob = new Blob([job.contents], { type: 'text/plain;charset=utf-8' });
-            objectUrl = URL.createObjectURL(blob);
-            download = document.createElement('a');
-            download.setAttribute(OWNED_ATTRIBUTE, 'download');
-            download.href = objectUrl;
-            download.download = job.filename;
-            download.style.display = 'none';
-            document.documentElement.appendChild(download);
-            download.click();
-            scheduleObjectUrlCleanup(objectUrl);
+        icon.disabled = true;
+        const mode = loaderConfig.localOnly ? 'local' : 'library';
+        ensureQueuePanel();
+        queueMessage('Sending request…');
+        queueAPI('/jobs', { urls: [media.url], mode }).then(() => {
             recordSubmission(media);
-            setFeedback(icon, true);
-            showStatus(loaderConfig.localOnly === true
-                ? `Local-only ${media.type} job file requested`
-                : `Job file requested: ${job.filename}`);
-            return true;
-        } catch {
-            if (objectUrl) revokeObjectUrl(objectUrl);
-            setFeedback(icon, false);
-            showStatus('Could not create the Hazel job', false);
-            return false;
-        } finally {
-            download?.remove();
-        }
+            if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, true);
+            queueMessage('Queued');
+            refreshQueueAfterAction();
+        }).catch(error => {
+            instance.recentJobs.delete(mediaKey(media));
+            if (mediaKey(icon._tmBeatportMedia) === mediaKey(media)) setFeedback(icon, false);
+            queueMessage(error.message, true);
+        });
+        return true;
     }
 
     function adjacentLinkIcons(link) {
@@ -925,11 +865,6 @@
                 opacity: 0.72; overflow: hidden; padding: 0 !important; position: static !important;
                 transition: opacity 120ms ease, transform 120ms ease; vertical-align: middle;
                 white-space: nowrap; width: 16px !important;
-            }
-            #${MODE_ID} {
-                position: fixed; right: 16px; bottom: 110px; z-index: 2147483646;
-                padding: 8px 12px; border: 1px solid #01ff95; border-radius: 7px;
-                background: #0b2018; color: #fff; font: 600 12px system-ui; cursor: pointer;
             }
             .${ICON_CLASS}.tm-beatportdl-local-submitted { background: #fff; opacity: 1; }
             .${ICON_CLASS}.tm-beatportdl-local-downloaded { background: #a6f3c8; opacity: 1; }
@@ -1490,12 +1425,16 @@
 
     function start() {
         if (instance.started) return;
+        if (loaderConfig.helperEnabled !== true
+            || ['getHelperToken', 'setHelperToken', 'setLocalOnly', 'onModeChange']
+                .some(name => typeof loaderConfig[name] !== 'function')
+            || typeof GM_xmlhttpRequest !== 'function') {
+            throw new Error('Beatport core requires loader 1.6.3 or newer. Update the loader through your private installer, then reload Beatport.');
+        }
         instance.started = true;
         addIconStyles();
         pruneSubmissionStorage();
-        reconcileModeControl();
-        if (loaderConfig.helperEnabled) ensureQueuePanel();
-        loaderConfig.onModeChange?.(reconcileModeControl);
+        ensureQueuePanel();
         window.addEventListener('focus', refreshSubmissionIcons);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) refreshSubmissionIcons();
@@ -1528,12 +1467,11 @@
         recordSubmission,
         pruneSubmissionStorage,
         titleMutation,
-        buildHazelJob,
         claimJob,
         cleanupObjectUrls,
         claimCurrentIcon,
         createFrameBatcher,
-        createHazelJob,
+        submitDownloadJob,
         confirmLargeJob,
         copyMediaUrl,
         getBeatportMediaUrl,

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'beatport-local-hazel.user.js'), 'utf8');
-function setup(t, storage = new Map(), legacy = false, {
+function setup(t, storage = new Map(), {
  html = '<main><h1>Track</h1><article><a href="/track/test/123">Track title</a><a href="/track/test/123">Short</a></article></main><div id="clock">0</div>',
  url = 'https://www.beatport.com/track/test/123',
 } = {}) {
@@ -15,8 +15,9 @@ function setup(t, storage = new Map(), legacy = false, {
  w.GM_getValue=(k,d)=>storage.has(k)?storage.get(k):d;
  w.GM_setValue=(k,v)=>{storage.set(k,v);for(const {key,fn} of listeners.values()) if(key===k)fn(k,null,v,true);};
  w.GM_listValues=()=>{storageScans++;return [...storage.keys()];}; w.GM_deleteValue=k=>storage.delete(k);
- if(!legacy){w.GM_addValueChangeListener=(key,fn)=>{listeners.set(++sequence,{key,fn});return sequence;};w.GM_removeValueChangeListener=id=>listeners.delete(id);}
- w.BEATPORTDL_CONFIG=legacy?{}:{get localOnly(){return local;},setLocalOnly(v){local=v;modeListener?.();},onModeChange(fn){modeListener=fn;}};
+ w.GM_addValueChangeListener=(key,fn)=>{listeners.set(++sequence,{key,fn});return sequence;};w.GM_removeValueChangeListener=id=>listeners.delete(id);
+ w.GM_xmlhttpRequest=()=>{throw new Error('DOM fixture must not contact the helper');};
+ w.BEATPORTDL_CONFIG={helperEnabled:true,getHelperToken:()=>'',setHelperToken(){},get localOnly(){return local;},setLocalOnly(v){local=v;modeListener?.();},onModeChange(fn){modeListener=fn;}};
  w.__TM_BEATPORTDL_TEST_MODE__={}; w.eval(source);
  const hooks=w.__TM_BEATPORTDL_TEST_HOOKS__;
  t.after(()=>{hooks.instance.observer.disconnect();w.close();});
@@ -46,7 +47,7 @@ for (const [type, pathname, description] of [
  ['playlist', '/library/playlists/123', 'playlist'],
 ]) {
  test(`download labels describe link and page context for ${pathname}`, async t => {
-  const h = setup(t, new Map(), false, {
+  const h = setup(t, new Map(), {
    html: `<main><h1>Page <span>collection</span></h1><article><a href="${pathname}">Linked <span>selection</span></a></article></main>`,
    url: `https://www.beatport.com${pathname}`,
   });
@@ -105,9 +106,9 @@ test('download labels follow changed link text, hrefs, and page titles during na
 test('row batching places one action and releases listeners for removed media',async t=>{
  const h=setup(t);await h.settle();
  assert.equal(h.w.document.querySelectorAll('article button').length,1);
- assert.equal(h.listeners.size,2);
+ assert.equal(h.listeners.size,3); // two media keys plus queue error acknowledgment
  h.w.document.querySelector('article').remove();h.w.history.pushState({},'', '/genre/house/5');h.w.document.querySelector('h1').remove();await h.settle();
- assert.equal(h.listeners.size,0);
+ assert.equal(h.listeners.size,1); // queue error acknowledgment remains active
 });
 test('submission state survives navigation and receives cross-tab updates; expiry is pruned',async t=>{
  const h=setup(t);await h.settle();const key='beatport.submitted.v1.track:123';
@@ -143,12 +144,21 @@ test('cleanup recovers when a clock change leaves its last-run timestamp in the 
  assert.equal(storage.has('beatport.submitted.v1.track:999'),false);
  assert(storage.get('beatport.submissionCleanup.v1')<=Date.now());
 });
-test('visible mode control follows clicks and loader updates; legacy loaders remain usable',async t=>{
- const h=setup(t);await h.settle();const mode=h.w.document.getElementById('tm-beatportdl-mode');
- assert.equal(h.w.getComputedStyle(mode).bottom,'110px');
- assert.match(mode.textContent,/Normal library/);mode.click();assert.match(mode.textContent,/Local only/);
- h.w.BEATPORTDL_CONFIG.setLocalOnly(false);assert.match(mode.textContent,/Normal library/);
- const old=setup(t,new Map(),true);await old.settle();assert.equal(old.w.document.getElementById('tm-beatportdl-mode'),null);assert.equal(old.w.document.querySelectorAll('article button').length,1);
+test('only the queue panel owns the download destination control',async t=>{
+ const h=setup(t);await h.settle();
+ assert.equal(h.w.document.getElementById('tm-beatportdl-mode'),null);
+ assert.equal(h.w.document.querySelectorAll('article button').length,1);
+ assert.doesNotMatch(source,/Downloads: Normal library|Downloads: Local only/);
+});
+test('obsolete or incomplete loaders fail clearly before adding controls or job files',t=>{
+ for(const config of [{},{helperEnabled:false},{helperEnabled:true}]) {
+  const dom=new JSDOM('<main><a href="/track/test/123">Track</a></main>',{url:'https://www.beatport.com/',runScripts:'outside-only'});
+  t.after(()=>dom.window.close());
+  dom.window.BEATPORTDL_CONFIG=config;
+  assert.throws(()=>dom.window.eval(source),/requires loader 1\.6\.3 or newer/);
+  assert.equal(dom.window.document.querySelector('button'),null);
+  assert.equal(dom.window[Symbol.for('tm.beatportdl.local.instance')],undefined,'loader can recover to its cached working core');
+ }
 });
 test('unrelated player changes do not reconcile the title control',async t=>{
  const h=setup(t);await h.settle();let headingQueries=0;const q=h.w.document.querySelector.bind(h.w.document);
@@ -156,12 +166,10 @@ test('unrelated player changes do not reconcile the title control',async t=>{
  q('#clock').firstChild.data='1';await h.settle();assert.equal(headingQueries,0);
 });
 
-// Both table variants observed during Beatport's layout rollout. The player
-// landmark is shared by the current variants; older Player-style builds remain
-// supported. Hashed class suffixes deliberately differ from the live site.
+// Current shared rows and stable player landmarks, with arbitrary hash suffixes.
 for (const [layout, rowClass, playerAttributes, titleMarkup] of [
- ['legacy', 'Table-style__TableRow-sc-fixture row tracks-table', 'class="Player-style__Player-fixture"', 'Track <span>Original Mix</span>'],
- ['new', 'Row-style__Stylized-sc-fixture row', 'id="bp-player" data-testid="bp-player" class="Player_wrapper__fixture"', '<div data-testid="marquee-parent"><span>Track</span> <span>Original Mix</span></div>'],
+ ['player ID', 'Row-style__Stylized-sc-fixture row', 'id="bp-player" class="Player_wrapper__fixture"', 'Track <span>Original Mix</span>'],
+ ['player test ID', 'Row-style__Stylized-sc-fixture row', 'data-testid="bp-player" class="Player_wrapper__fixture"', '<div data-testid="marquee-parent"><span>Track</span> <span>Original Mix</span></div>'],
 ]) {
  const html = `<main><div class="${rowClass}"><div class="cell"><a href="/track/test/123">${titleMarkup}</a></div>
   <div class="cell"><a href="/track/test/123">Track</a></div></div></main>
@@ -172,7 +180,7 @@ for (const [layout, rowClass, playerAttributes, titleMarkup] of [
   <nav><a href="/track/test/123">Unrelated navigation</a></nav>`;
  test(`${layout} rows and player keep one action per item and restore saved checkmarks offline`, async t => {
   const storage = new Map([['beatport.downloaded.v1.track:123', Date.now()-365*86400000]]);
-  const h = setup(t, storage, false, {html, url:'https://www.beatport.com/genre/house/5'});
+  const h = setup(t, storage, {html, url:'https://www.beatport.com/genre/house/5'});
   await h.settle();
   const player = h.w.document.querySelector('main + div');
   const buttons = [...h.w.document.querySelectorAll('.tm-beatportdl-local-icon')];
@@ -209,7 +217,7 @@ for (const [layout, rowClass, playerAttributes, titleMarkup] of [
   assert.equal(h.w.document.querySelector('main button').textContent, '✓');
  });
  test(`${layout} download actions do not activate row/player pointer or keyboard shortcuts`, async t => {
-  const h = setup(t, new Map(), false, {html, url:'https://www.beatport.com/genre/house/5'});
+  const h = setup(t, new Map(), {html, url:'https://www.beatport.com/genre/house/5'});
   await h.settle(); let shortcuts=0, copied='';
   h.w.GM_setClipboard=value=>{copied=value;};
   for(const type of ['click','pointerdown','pointerup','mousedown','mouseup','dblclick','keydown','keyup']) {
@@ -234,13 +242,13 @@ for (const [layout, rowClass, playerAttributes, titleMarkup] of [
 }
 
 test('nested headings still reconcile after row-scoped mutation batching', async t => {
- const h=setup(t,new Map(),false,{html:'<main><article><h1>Track <span>name</span></h1></article></main>'});
+ const h=setup(t,new Map(),{html:'<main><article><h1>Track <span>name</span></h1></article></main>'});
  await h.settle(); h.w.document.querySelector('h1 span').firstChild.data='renamed';
  await h.settle(); assert.match(h.w.document.querySelector('h1 + button').title,/renamed/);
 });
 
 test('scrolling metadata never duplicates actions or names and keeps buttons outside ellipsized text', async t => {
- const h=setup(t,new Map([['beatport.downloaded.v1.artist:456',Date.now()]]),false,{
+ const h=setup(t,new Map([['beatport.downloaded.v1.artist:456',Date.now()]]),{
   html:`<main></main><div data-testid="bp-player">
    <div class="Player_titleRow__fixture"><a href="/track/test/123"><div data-testid="marquee-parent">
     <div>Track Original Mix</div><div data-testid="marquee-pseudo">Track Original Mix</div></div></a></div>
@@ -285,5 +293,24 @@ test('recent submissions require confirmation while Shift-click still copies wit
  const status=h.w.document.getElementById('tm-beatportdl-status');
  assert.equal(status.hidden,false);
  assert.equal(h.w.getComputedStyle(status).bottom,'110px');
- assert.equal(h.w.getComputedStyle(status).bottom,h.w.getComputedStyle(h.w.document.getElementById('tm-beatportdl-mode')).bottom);
+ assert.equal(h.w.document.getElementById('tm-beatportdl-mode'),null);
 });
+
+for(const pathname of ['/track/test/123','/release/test/123','/artist/test/123','/label/test/123',
+ '/chart/test/123','/playlist/test/123','/library/playlists/123','/playlists/share/123']) {
+ test(`current rows keep one downloaded action across cells on ${pathname}`,async t=>{
+  const h=setup(t,new Map([['beatport.downloaded.v1.track:456',Date.now()]]),{
+   url:'https://www.beatport.com'+pathname,
+   html:`<main><div class="Row-style__Stylized-sc-fixture row">
+    <div><a href="/track/example/456"><div data-testid="marquee-parent"><span>Track</span><span data-testid="marquee-pseudo">Track</span></div></a></div>
+    <div><a href="/track/example/456">Track Original Mix</a></div>
+    <div><a href="/label/example/789">Label</a></div><div><a href="/label/example/789">Label</a></div>
+   </div></main>`,
+  });
+  await h.settle();
+  const buttons=[...h.w.document.querySelectorAll('main button')];
+  assert.equal(buttons.length,2);
+  assert.equal(buttons.find(b=>b.dataset.tmBeatportMediaKey==='track:456').textContent,'✓');
+  assert.equal(h.w.document.querySelector('[data-testid="marquee-pseudo"] button'),null);
+ });
+}
