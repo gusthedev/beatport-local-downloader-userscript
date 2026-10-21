@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.17
+// @version      2.0.18
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.17';
+    const CORE_VERSION = '2.0.18';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -84,6 +84,8 @@
     const TITLE_ICON_CLASS = 'tm-beatportdl-page-title-icon';
     const TITLE_WRAP_CLASS = 'tm-beatportdl-page-title-wrap';
     const LABEL_PARENT_CLASS = 'tm-beatportdl-label-parent';
+    const ACTION_MARQUEE_CLASS = 'tm-beatportdl-action-marquee';
+    const MARQUEE_COPY_SELECTOR = '[data-testid="marquee-pseudo"]';
     // Beatport is serving both styled-component tables and CSS-module players.
     // Prefer its stable player landmark, retaining the previous player fallback.
     const PLAYER_SELECTOR = '[data-testid="bp-player"], #bp-player, [class*="Player-style__"]';
@@ -182,8 +184,18 @@
 
     function getEligibleMedia(link) {
         if (!isAnchorNode(link)) return null;
+        if (link.closest(MARQUEE_COPY_SELECTOR)) return null;
         if (!link.closest('main') && !link.closest(PLAYER_SELECTOR)) return null;
         return getBeatportMediaUrl(link.getAttribute('href'));
+    }
+
+    function mediaText(element) {
+        if (!element) return '';
+        if (!element.querySelector?.(MARQUEE_COPY_SELECTOR)) return element.textContent.trim();
+        // Scrolling text has a decorative duplicate, not another media title.
+        const copy = element.cloneNode(true);
+        copy.querySelectorAll(MARQUEE_COPY_SELECTOR).forEach(node => node.remove());
+        return copy.textContent.trim();
     }
 
     function isOwnedNode(node) {
@@ -307,7 +319,7 @@
         }
         // Link and page-title controls both follow the text they describe.
         // Keep that context here so submission refreshes cannot overwrite it.
-        const name = icon.previousElementSibling?.textContent.trim() || media.id;
+        const name = mediaText(icon.previousElementSibling) || media.id;
         const description = media.type === 'artist' || media.type === 'label' ? `${media.type} catalog`
             : media.type === 'release' ? 'full release' : media.type;
         const download = `${description} ${name} for local FLAC download`;
@@ -491,12 +503,21 @@
         parent.classList.toggle(LABEL_PARENT_CLASS, hasLabelIcon);
     }
 
+    function updateActionMarquee(parent) {
+        const marquee = parent?.closest?.('[data-testid="marquee-parent"]');
+        if (!marquee) return;
+        const hasAction = Array.from(marquee.querySelectorAll(`.${ICON_CLASS}`))
+            .some(icon => !icon.closest(MARQUEE_COPY_SELECTOR));
+        marquee.classList.toggle(ACTION_MARQUEE_CLASS, hasAction);
+    }
+
     function removeIcon(icon) {
         if (!icon) return;
         const parent = icon.parentElement;
         clearFeedback(icon);
         icon.remove();
         updateLabelParent(parent);
+        updateActionMarquee(parent);
         if (icon === instance.activeTitleIcon) {
             instance.activeTitleIcon = null;
             instance.activeHeading = null;
@@ -622,7 +643,7 @@
             const bestByMedia = new Map();
             for (const candidate of item.querySelectorAll('a[href]')) {
                 const candidateMedia = getEligibleMedia(candidate);
-                const text = candidate.textContent.trim();
+                const text = mediaText(candidate);
                 if (!candidateMedia || !text || candidate.querySelector('img, picture')) continue;
                 const key = mediaKey(candidateMedia);
                 const score = Math.min(text.length, 80) + (candidate.querySelector('h1, h2, h3, h4') ? 200 : 0);
@@ -665,6 +686,7 @@
         icon.dataset.tmBeatportMediaKey = mediaKey(media);
         icon._tmBeatportMedia = media;
         updateLabelParent(icon.parentElement);
+        updateActionMarquee(icon.parentElement);
         watchSubmission(media);
         refreshSubmissionIcon(icon);
     }
@@ -924,6 +946,21 @@
                 align-items: center !important; display: flex !important; flex-flow: row nowrap !important;
             }
             .${LABEL_PARENT_CLASS} > a { flex: 0 1 auto !important; min-width: 0 !important; width: auto !important; }
+            /* Keep action-bearing text stationary and truncate names, not their
+               buttons. Never change the waveform, artwork, or player controls. */
+            .${ACTION_MARQUEE_CLASS} { display: block !important; overflow: hidden !important; }
+            .${ACTION_MARQUEE_CLASS} > ${MARQUEE_COPY_SELECTOR} { display: none !important; }
+            .${ACTION_MARQUEE_CLASS} > :not(${MARQUEE_COPY_SELECTOR}) {
+                display: flex !important; align-items: center; width: 100% !important; min-width: 0 !important;
+                animation: none !important; transform: none !important;
+            }
+            .${ACTION_MARQUEE_CLASS} [class*="Player_artists__"] {
+                display: flex !important; align-items: center; width: 100%; min-width: 0;
+            }
+            .${ACTION_MARQUEE_CLASS} a {
+                flex: 0 1 auto !important; min-width: 0 !important; overflow: hidden !important;
+                text-overflow: ellipsis; white-space: nowrap;
+            }
             #${STATUS_ID} {
                 background: #0b2018; border: 1px solid #01ff95; border-radius: 7px; bottom: 110px;
                 color: #fff; font: 600 13px/1.35 system-ui, sans-serif; left: 50%; max-width: min(520px, 88vw);
