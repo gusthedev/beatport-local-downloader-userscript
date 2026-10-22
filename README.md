@@ -20,6 +20,8 @@ Core 2.0.18 excludes decorative scrolling-text copies from download actions and 
 
 Core **2.0.19** retires the old per-download TXT path, bottom destination toggle, and obsolete `Player-style`, `TrackRow`, `TableRow`, and `ListItem` class fallbacks. The current shared rows were checked on track, release, artist, label, chart, and public-playlist pages. Stable player landmarks and normal semantic list/row elements remain supported. Older/incomplete loaders fail with an explicit update instruction before controls are added. Safari 27 buffering, cached-core rollback, saved checkmarks, Hazel wake/pairing files, and the local queue's manual TXT/retry intake are unchanged.
 
+Core **2.0.20** handles Safari 27 mouse presses that deliver pointer-down/up without a click. Download controls activate once on a matching primary mouse release and consume any following native click, including after a repeat-download confirmation is cancelled. Dragged, cancelled, detached, disabled, or recycled controls do not activate. Shift-click copying, confirmation prompts, keyboard activation, player isolation, and Chrome's normal click handling remain intact. No loader reinstall or pairing change is needed.
+
 The shared core turns the collapsed Downloads button red for new, unreviewed failures. Opening History acknowledges them; pre-existing historical failures do not trigger a new alert after first installing this feature. Completed jobs use one line, e.g. **1/1 file delivered to Venus** or **3/3 files delivered locally**. A same-folder, same-filename collision is shown as **Duplicate**, leaving the existing file untouched (requires the updated private helper).
 
 If a status request fails after active work was observed or while refreshing a successful action, the panel retries up to four times with delays of 1.5, 3, 6, and 12 seconds, even when collapsed. A current successful response or a new successful action resets the retry budget. Hidden or suspended pages pause observation and resume pending retries when restored; restoration does not replenish the budget. Ordinary idle observations do not receive these retries, and status checks never wake the helper.
@@ -61,7 +63,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.19** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.20** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -76,7 +78,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.19**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.20**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 

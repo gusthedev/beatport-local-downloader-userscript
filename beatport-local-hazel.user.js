@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.19
+// @version      2.0.20
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.19';
+    const CORE_VERSION = '2.0.20';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -26,11 +26,14 @@
         return;
     }
 
-    function installSafariPlaybackFix(page) {
-        const agent = page.navigator?.userAgent || '';
+    function isSafari27(agent = '') {
         const safariVersion = agent.match(/Version\/(\d+).*Safari\//);
-        if (!safariVersion || Number(safariVersion[1]) !== 27
-            || /Chrome|Chromium|CriOS|Edg|OPR|FxiOS/.test(agent)
+        return Boolean(safariVersion && Number(safariVersion[1]) === 27
+            && !/Chrome|Chromium|CriOS|Edg|OPR|FxiOS/.test(agent));
+    }
+
+    function installSafariPlaybackFix(page) {
+        if (!isSafari27(page.navigator?.userAgent || '')
             || !page.MediaSource || page.__beatportSafariPlaybackFix) return;
 
         const state = { version: '1.0.1', applied: false };
@@ -460,10 +463,58 @@
         return submitDownloadJob(media, icon);
     }
 
+    function createSafariMouseActivation(icon, activate) {
+        let press = null, suppressClick = false;
+        const primaryMouse = event => event.isTrusted === true
+            && event.pointerType === 'mouse' && event.button === 0 && event.isPrimary !== false;
+        const moved = event => Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8;
+        return {
+            handle(event) {
+                if (event.type === 'keydown' && ['Enter', ' '].includes(event.key)) {
+                    press = null;
+                    suppressClick = false;
+                } else if (event.type === 'pointerdown') {
+                    press = null;
+                    suppressClick = false;
+                    if (primaryMouse(event) && !icon.disabled && icon.isConnected) {
+                        press = { id: event.pointerId, x: event.clientX, y: event.clientY,
+                            key: mediaKey(icon._tmBeatportMedia) };
+                    }
+                } else if (press && event.isTrusted === true && event.pointerId === press.id) {
+                    if (event.type === 'pointermove' && moved(event)
+                        || ['pointerleave', 'pointercancel', 'lostpointercapture'].includes(event.type)) {
+                        press = null;
+                        suppressClick = true;
+                    } else if (event.type === 'pointerup') {
+                        const valid = primaryMouse(event) && !moved(event) && icon.contains(event.target)
+                            && icon.isConnected && !icon.disabled && press.key === mediaKey(icon._tmBeatportMedia);
+                        press = null;
+                        // Set before activation: confirm() can block until long
+                        // after pointerup, so time-based deduplication is unsafe.
+                        suppressClick = true;
+                        if (valid) activate(event);
+                    }
+                }
+            },
+            consumeClick(event) {
+                // Keyboard/assistive and programmatic activation have detail 0.
+                // A new pointerdown starts a new gesture even if Safari omitted
+                // the previous click. Never suppress the next real mouse press.
+                if (!suppressClick || event.isTrusted !== true || event.detail === 0) return false;
+                suppressClick = false;
+                return true;
+            },
+        };
+    }
+
     function bindMediaAction(icon) {
+        const safariMouse = isSafari27(globalThis.navigator?.userAgent || '')
+            ? createSafariMouseActivation(icon, event => handleMediaAction(event, icon._tmBeatportMedia, icon))
+            : null;
         icon.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
+            if (safariMouse?.consumeClick(event)) return;
             handleMediaAction(event, icon._tmBeatportMedia, icon);
         });
         // Keep native button focus/activation, but do not also play a table row
@@ -471,7 +522,13 @@
         for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'keydown', 'keyup']) {
             icon.addEventListener(type, event => {
                 if (!type.startsWith('key') || event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+                safariMouse?.handle(event);
             });
+        }
+        if (safariMouse) {
+            for (const type of ['pointermove', 'pointerleave', 'pointercancel', 'lostpointercapture']) {
+                icon.addEventListener(type, event => safariMouse.handle(event));
+            }
         }
     }
 
@@ -1460,6 +1517,9 @@
     }
 
     instance.testHooks = {
+        isSafari27,
+        createSafariMouseActivation,
+        bindMediaAction,
         installSafariPlaybackFix,
         downloadTime,
         syncDownloadedRecords,
