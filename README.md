@@ -101,7 +101,7 @@ The repository contains no Beatport username, password, pairing tokens, personal
 
 ## Development checks
 
-Use Node.js **24.19.0** to match CI. The jsdom 30.1.3 development dependency requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`; the root package declares the same supported range.
+Use Node.js **24.22.1** to match CI. The jsdom 30.1.3 development dependency requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`; the root package declares the same supported range.
 
 Run `npm ci` followed by `npm test`. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, current page rows/player landmarks, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, loader requirements, direct queue submissions, Hazel wake/pairing files, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
 
