@@ -792,6 +792,69 @@ test('an awake helper never needs a wake file even after reconnecting', async t 
     assert.equal(h.downloads.length,0);
 });
 
+const LAUNCHD_MODE = 'beatportLoader.wakeTransport.v1';
+const isActivation = request => new URL(request.url).port === '17855';
+
+test('launchd discovery, open panels, polling and restored tabs never use the activation socket', async t => {
+    const h=setup(t, sharedStorage({[LAUNCHD_MODE]:'launchd'}));
+    await h.settle();
+    const clock=queueClock(h);
+    h.setSnapshot({active:true, idle_remaining:null});
+    h.shadow.querySelector('[data-toggle]').click();await h.settle();
+    await clock.tick(1500);
+    h.setSnapshot({active:false,idle_remaining:0});
+    await clock.tick(1500);
+    h.w.GM_xmlhttpRequest=request=>{h.requests.push(request);request.onerror();};
+    h.w.document.dispatchEvent(new h.w.Event('visibilitychange'));await h.settle();
+    assert(h.requests.length >= 3);
+    assert(h.requests.every(request=>!isActivation(request)), 'all passive reads stay on the non-activating port');
+    assert.equal(h.downloads.length,0);
+});
+
+test('launchd coalesces explicit wake requests and submits directly without a trigger file', async t => {
+    const h=setup(t, sharedStorage({[LAUNCHD_MODE]:'launchd'}));await h.settle();
+    const respond=h.w.GM_xmlhttpRequest;
+    let activation;
+    h.w.GM_xmlhttpRequest=request=>{
+        if(request.url.endsWith('/health')){h.requests.push(request);request.onerror();}
+        else if(isActivation(request)){h.requests.push(request);activation=request;}
+        else respond(request);
+    };
+    h.w.document.querySelector('article button').click();
+    h.shadow.querySelector('[data-wake]').click();await h.settle();
+    assert.equal(h.requests.filter(isActivation).length,1);
+    assert.equal(activation.url,'http://127.0.0.1:17855/wake');
+    assert.equal(activation.method,'POST');
+    assert.equal(activation.headers.Authorization,'Bearer '+'a'.repeat(64));
+    activation.onload({status:200,responseText:'{"ok":true}'});await h.settle();
+    assert.equal(h.requests.filter(r=>r.method==='POST'&&r.url.endsWith('/jobs')).length,1);
+    assert.equal(h.downloads.length,0);
+});
+
+test('launchd startup failure never falls back to Hazel or submits a job', async t => {
+    const h=setup(t, sharedStorage({[LAUNCHD_MODE]:'launchd'}));await h.settle();
+    h.w.GM_xmlhttpRequest=request=>{h.requests.push(request);request.onerror();};
+    h.w.document.querySelector('article button').click();await h.settle();
+    assert.equal(h.requests.filter(isActivation).length,1);
+    assert.equal(h.requests.filter(r=>r.method==='POST'&&r.url.endsWith('/jobs')).length,0);
+    assert.equal(h.downloads.length,0);
+    assert.match(h.shadow.querySelector('[data-message]').textContent,/macOS installation/);
+});
+
+test('launchd pairing is explicit, debounced and opens the requesting browser without a file', async t => {
+    const h=setup(t, sharedStorage({[LAUNCHD_MODE]:'launchd'}));await h.settle();
+    h.w.BEATPORTDL_CONFIG.getHelperToken=()=>'';
+    Object.defineProperty(h.w.navigator,'userAgent',{value:'Mozilla/5.0 Version/27.0 Safari/605.1.15'});
+    h.shadow.querySelector('[data-repair-pair]').click();
+    h.shadow.querySelector('[data-repair-pair]').click();await h.settle();
+    const requests=h.requests.filter(isActivation);
+    assert.equal(requests.length,1);
+    assert.equal(requests[0].url,'http://127.0.0.1:17855/pair');
+    assert.equal(JSON.parse(requests[0].data).browser,'safari');
+    assert.equal(requests[0].headers['X-Beatport-Setup'],'1');
+    assert.equal(h.downloads.length,0);
+});
+
 test('historical failures stay collapsed, capped at ten, and do not set an error badge', async t => {
     const h=setup(t);
     h.setSnapshot({history_count:1000,jobs:Array.from({length:30},(_,i)=>({id:String(i),title:'Old track '+i,state:'failed',mode:'local',label:'Needs attention',updated:1,error:'Old failure'}))});
