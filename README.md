@@ -4,7 +4,7 @@ This repository contains the public browser side of a local Beatport download qu
 
 ## On-demand macOS activation
 
-Core **2.0.21** supports a separately installed launch agent and helper **2.1.0**. The private installer opts a browser into this mode by saving `beatportLoader.wakeTransport.v1 = 'launchd'`; public updates preserve that preference. Installing the public userscript alone does not install or enable the launch agent.
+Core **2.0.22** supports a separately installed launch agent and helper **2.1.0**. The private installer opts a browser into this mode by saving `beatportLoader.wakeTransport.v1 = 'launchd'`; public updates preserve that preference. Installing the public userscript alone does not install or enable the launch agent.
 
 Only explicit actions use the activation socket at `127.0.0.1:17855`. Page-load discovery, queue polling and confirmed-download synchronization always use `127.0.0.1:17854`, which is available only while the helper runs. Opening Beatport, opening the queue panel, returning to a tab, or background retries cannot start the helper. The helper still exits after three idle minutes; status reads never extend that deadline. No helper process runs at login or remains alive between uses.
 
@@ -71,7 +71,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.21** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.22** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -86,7 +86,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.21**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.22**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 
