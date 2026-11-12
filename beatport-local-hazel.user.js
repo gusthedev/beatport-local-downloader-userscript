@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Beatport Local FLAC Download (Hazel)
 // @namespace    local.beatportdl.hazel
-// @version      2.0.20
+// @version      2.0.22
 // @description  Adds local BeatportDL buttons for tracks, releases, playlists, charts, labels, and artists.
 // @author       Gustavo
 // @match        https://www.beatport.com/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const INSTANCE_KEY = Symbol.for('tm.beatportdl.local.instance');
-    const CORE_VERSION = '2.0.20';
+    const CORE_VERSION = '2.0.22';
     const TEST_CONFIG = globalThis.__TM_BEATPORTDL_TEST_MODE__;
     const loaderConfig = typeof globalThis.BEATPORTDL_CONFIG === 'object' && globalThis.BEATPORTDL_CONFIG
         ? globalThis.BEATPORTDL_CONFIG
@@ -965,6 +965,12 @@
     }
 
     const HELPER_URL = 'http://127.0.0.1:17854';
+    // Only deliberate actions use this launchd-owned socket. All discovery,
+    // history sync and polling stay on the non-activating status port above.
+    const HELPER_WAKE_URL = 'http://127.0.0.1:17855';
+    function usesLaunchd() {
+        return typeof GM_getValue === 'function' && GM_getValue('beatportLoader.wakeTransport.v1', 'hazel') === 'launchd';
+    }
     const QUEUE_RETRY_DELAYS = [1500, 3000, 6000, 12000];
     let queuePanel, queueHost, queuePollTimer = 0, queuePolling = false, queueWaking;
     let queueLastSnapshot = null;
@@ -1077,6 +1083,13 @@
         const agent = navigator.userAgent || '';
         const browser = /Chrome\//.test(agent) && !/Edg|OPR/.test(agent) ? 'chrome'
             : /Version\/.*Safari\//.test(agent) ? 'safari' : 'default';
+        if (usesLaunchd()) {
+            pairingRequestedAt = Date.now();
+            requestLaunchd('/pair', { browser }).then(() => {
+                queueMessage('Opening the private installer. Approve Update in Tampermonkey, then reload Beatport. If it says Reinstall or warns about resetting settings, cancel.');
+            }).catch(() => queueMessage('Could not request setup. Run Install Beatport Loader.command from your local BeatportDL folder.', true));
+            return;
+        }
         try {
             downloadWakeFile('beatportdl-wake-pair-' + browser + '-' + Date.now() + '.txt');
             pairingRequestedAt = Date.now();
@@ -1111,12 +1124,35 @@
         }));
     }
 
+    function requestLaunchd(path, data = {}) {
+        const token = loaderConfig.getHelperToken?.() || '';
+        return new Promise((resolve, reject) => GM_xmlhttpRequest({
+            method: 'POST', url: HELPER_WAKE_URL + path,
+            headers: { 'Content-Type': 'application/json', 'X-Beatport-Setup': '1', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+            data: JSON.stringify(data), timeout: 10000,
+            onload(response) {
+                try {
+                    const value = JSON.parse(response.responseText);
+                    if (response.status >= 400) throw new Error(value.error || 'Local helper refused the request.');
+                    resolve(value);
+                } catch (error) { reject(error); }
+            },
+            onerror() { reject(new Error('Could not start the local helper. Check its macOS installation.')); },
+            ontimeout() { reject(new Error('Local helper startup timed out. Use Start / reconnect to try again.')); },
+        }));
+    }
+
     function wakeQueue() {
         if (queueWaking) return queueWaking;
         queueWaking = (async () => {
             if (!loaderConfig.getHelperToken?.()) { pairingStatus('missing'); throw new Error('Click Pair this browser for automatic setup.'); }
             try { await helperRequest('/health'); return; } catch (error) {
                 if (/pairing|refused/i.test(error.message)) throw error;
+            }
+            if (usesLaunchd()) {
+                queueMessage('Starting local helper…');
+                await requestLaunchd('/wake');
+                return;
             }
             // One transient wake file when asleep, never a per-track job file.
             downloadWakeFile('beatportdl-wake-' + Date.now() + '.txt');

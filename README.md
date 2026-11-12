@@ -1,6 +1,14 @@
 # Beatport Local Download Userscript
 
-This repository contains the public browser side of a local Beatport download queue. Loader **1.6.3 or newer is required**: the browser sends jobs directly to a privately paired on-demand helper. Hazel only wakes a sleeping helper using one temporary trigger. The old browser-generated per-download TXT workflow has been retired; manually supplied TXT batches and retry files remain supported by the local queue.
+This repository contains the public browser side of a local Beatport download queue. Loader **1.6.3 or newer is required**: the browser sends jobs directly to a privately paired on-demand helper. Upgraded local installations use macOS launchd to wake the helper without downloading a trigger file. Existing Hazel installations remain supported until explicitly migrated. The old browser-generated per-download TXT workflow has been retired; manually supplied TXT batches and retry files remain supported by the local queue.
+
+## On-demand macOS activation
+
+Core **2.0.22** supports a separately installed launch agent and helper **2.1.0**. The private installer opts a browser into this mode by saving `beatportLoader.wakeTransport.v1 = 'launchd'`; public updates preserve that preference. Installing the public userscript alone does not install or enable the launch agent.
+
+Only explicit actions use the activation socket at `127.0.0.1:17855`. Page-load discovery, queue polling and confirmed-download synchronization always use `127.0.0.1:17854`, which is available only while the helper runs. Opening Beatport, opening the queue panel, returning to a tab, or background retries cannot start the helper. The helper still exits after three idle minutes; status reads never extend that deadline. No helper process runs at login or remains alive between uses.
+
+Launchd wake failures are reported without falling back to Hazel. Pairing uses the same explicit activation path and opens the private installer in the requesting browser; `Install Beatport Loader.command` remains the local setup fallback. The wake endpoint requires the existing private bearer key. Pairing requires a separate explicit JSON request and never returns the key or installer URL to the webpage.
 
 ## Live queue panel
 
@@ -36,7 +44,7 @@ The Venus button reads **Venus Connected** and is disabled when already mounted,
 
 The helper is installed separately; this public loader contains no pairing secret. Click **Pair this browser** when setup is needed: a temporary Hazel trigger asks the installed helper to open its private installer in your normal Safari or Chrome session (other browsers use the system default). Approve **Update** in Tampermonkey and reload Beatport. If it says **Reinstall** or warns about resetting settings, cancel. The helper gives each private pairing copy a newer fourth version component so it updates the existing script while preserving preferences; future public patch versions still sort higher. No secret needs to be copied, and later public updates preserve pairing. The button requires the current private helper; the local Install Beatport Loader.command remains a fallback. Advanced connection settings contains manual repair, but is not required when the panel says connected.
 
-Requests use Tampermonkey's localhost grant and authenticated loopback requests. Status reads never launch or keep the helper alive. No always-running service is required; the local helper exits after its idle grace period. Browser downloads must save to the Hazel-watched Downloads folder for waking and automatic pairing to work.
+Requests use Tampermonkey's localhost grant and authenticated loopback requests. Status reads never launch or keep the helper alive. No always-running helper is required; the local helper exits after its idle grace period. Only legacy Hazel installations require browser downloads to save to the Hazel-watched Downloads folder.
 
 The private helper accepts Safari's UUID-shaped `safari-web-extension://` request origin only with the correct private bearer key and exact loopback Host. Ordinary foreign website origins remain blocked. Address/origin rejections are reported separately from an invalid pairing key.
 
@@ -63,7 +71,7 @@ Current versions on `main`:
 | Component | Version | How it is installed and updated |
 | --- | --- | --- |
 | Loader (`beatport-local-loader.user.js`) | **1.6.3** | Installed and updated by Tampermonkey. |
-| Shared core (`beatport-local-hazel.user.js`) | **2.0.20** | Downloaded, validated, and cached by the loader. |
+| Shared core (`beatport-local-hazel.user.js`) | **2.0.22** | Downloaded, validated, and cached by the loader. |
 
 Install [`beatport-local-loader.user.js`](https://raw.githubusercontent.com/gusthedev/beatport-local-downloader-userscript/main/beatport-local-loader.user.js) in Tampermonkey once. The loader installs the shared core automatically; do not install the core as a second userscript.
 
@@ -78,7 +86,7 @@ If you have an older loader, update it to **1.6.3** through your private paired 
 
 On first use, the loader downloads, validates, and starts the shared core. After that it starts the cached last-known-good core immediately at `document-start` and keeps working from cache if GitHub is unavailable. With an active core, automatic update checks on page load run at most hourly using conditional requests. A newer core is cached for the next Beatport page load.
 
-To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.20**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
+To fetch the current core immediately, use Tampermonkey's **Check for shared-core updates now** menu command, then reload Beatport. Use **Show shared-core status** to check the active, cached, and rollback versions; the current core is **2.0.22**. Other menu commands toggle artist/label confirmation, show the download panel, or switch new jobs between normal and local-only routing.
 
 Core 2.0.13 restores native Enter/Space expand-and-collapse behavior for the **Beatport account** summary without submitting credentials. Enter in either credential field still saves; the Save button retains native keyboard activation. Active-job restrictions and credential clearing remain in place.
 
@@ -101,7 +109,7 @@ The repository contains no Beatport username, password, pairing tokens, personal
 
 ## Development checks
 
-Use Node.js **24.22.2** to match CI. The jsdom 30.1.3 development dependency requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`; the root package declares the same supported range.
+Use Node.js **26.13.1** to match CI. The jsdom 31.0.0 development dependency requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`; the root package declares the same supported range.
 
 Run `npm ci` followed by `npm test`. The tests (including jsdom browser fixtures) cover accepted and rejected Beatport URLs, canonicalization, current page rows/player landmarks, cross-browser DOM wrappers, mutation batching, single-page navigation, singleton and rollback behavior, manual cache bypass, loader requirements, direct queue submissions, Hazel wake/pairing files, copy/confirmation behavior, duplicate prevention, and temporary URL cleanup.
 
